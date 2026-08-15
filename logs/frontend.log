@@ -1,0 +1,13 @@
+
+> frontend@0.0.0 dev
+> vite --host 0.0.0.0
+
+Port 5173 is in use, trying another one...
+Port 5174 is in use, trying another one...
+Port 5175 is in use, trying another one...
+Port 5176 is in use, trying another one...
+
+  VITE v8.2.0  ready in 178 ms
+
+  ➜  Local:   http://localhost:5177/
+  ➜  Network: http://172.24.0.13:5177/  ens33
