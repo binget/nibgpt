@@ -18,7 +18,9 @@ class ChatMessageResponse(BaseModel):
     role: str
     content: str
     source_type: str | None
+    report_payload: dict | None = None
     created_at: datetime
+    
 
     model_config = ConfigDict(from_attributes=True)
 

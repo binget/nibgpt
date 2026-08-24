@@ -211,7 +211,52 @@ def generate_governed_query_plan(
         for item in plan.filters
     ]
 
-    aggregation_response = None
+    aggregation_responses = []
+
+    effective_aggregations = (
+        plan.aggregations
+        if plan.aggregations
+        else (
+            [plan.aggregation]
+            if plan.aggregation
+            else []
+        )
+    )
+
+    for aggregation in effective_aggregations:
+        aggregation_responses.append(
+            GovernedPlanAggregationResponse(
+                function=(
+                    aggregation.function
+                ),
+                metadata_column_id=(
+                    aggregation
+                    .resolved_column
+                    .column.id
+                    if aggregation.resolved_column
+                    else None
+                ),
+                metadata_table_id=(
+                    aggregation
+                    .table.table.id
+                    if aggregation.table
+                    else None
+                ),
+                column_name=(
+                    aggregation
+                    .resolved_column
+                    .column.column_name
+                    if aggregation.resolved_column
+                    else None
+                ),
+                alias=(
+                    aggregation.alias
+                ),
+                confidence=(
+                    aggregation.confidence
+                ),
+            )
+        )
 
     if plan.aggregation:
         aggregation_response = (
@@ -439,6 +484,9 @@ def generate_governed_query_plan(
         filters=filters,
         aggregation=(
             aggregation_response
+        ),
+        aggregations=(
+            aggregation_responses
         ),
         group_by=group_by,
         order_by=order_by,

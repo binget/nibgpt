@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
 
     data_source_encryption_key: str
+    
+    ai_provider: str = "none"
+
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-5.1"
+
+    ollama_base_url: str = (
+        "http://127.0.0.1:11434"
+    )
+    ollama_model: str = "qwen2.5:3b"
 
     model_config = SettingsConfigDict(
         env_file=".env",

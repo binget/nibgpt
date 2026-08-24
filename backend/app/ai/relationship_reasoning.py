@@ -3,6 +3,8 @@ import re
 from collections import deque
 from dataclasses import dataclass, field
 
+from click import prompt
+
 from sqlalchemy import select
 from sqlalchemy.orm import (
     Session,
@@ -1094,6 +1096,36 @@ def prune_entity_matches(
 
     requested_dimensions: set[str] = set()
 
+        # --------------------------------------------------
+    # Rich branch account reports also require District.
+    #
+    # Example:
+    #
+    # "Show active account report by branch"
+    #
+    # Required entities:
+    # Fbnk Account
+    # F Company
+    # Districts
+    # --------------------------------------------------
+
+    if (
+        "account report"
+        in normalized_prompt
+        and (
+            "by branch"
+            in normalized_prompt
+            or "by branches"
+            in normalized_prompt
+        )
+    ):
+        requested_dimensions.update(
+            {
+                "districts",
+                "f eb district",
+            }
+        )
+
     for term, entity_names in (
         dimension_terms.items()
     ):
@@ -1805,6 +1837,40 @@ def analyze_relationship_reasoning(
     # business concepts, not status/filter/aggregation words.
     entity_terms = build_entity_terms(
         extraction_result
+    )
+
+    # --------------------------------------------------
+    # Rich account-report semantic expansion
+    #
+    # A branch account report also includes the
+    # related District Name as a report dimension.
+    # --------------------------------------------------
+
+    normalized_business_prompt = normalize_text(
+                prompt
+            )
+
+    if (
+            "account report"
+            in normalized_business_prompt
+            and (
+                "by branch"
+                in normalized_business_prompt
+                or "by branches"
+                in normalized_business_prompt
+            )
+        ):
+        entity_terms.extend(
+        [
+            "district",
+            "districts",
+        ]
+    )
+
+    entity_terms = list(
+        dict.fromkeys(
+            entity_terms
+        )
     )
 
     # Broader context is still useful for physical-column

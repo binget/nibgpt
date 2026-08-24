@@ -1,15 +1,30 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+)
 
-from app.ai.engine import generate_nibgpt_response
-from app.database.session import get_db
-from app.models.conversation import ChatMessage, Conversation
+from pydantic import BaseModel, Field
+
+from sqlalchemy import select
+from sqlalchemy.orm import (
+    Session,
+    selectinload,
+)
+
+from app.database.session import (
+    get_db,
+)
+
+from app.models.conversation import (
+    ChatMessage,
+    Conversation,
+)
+
 from app.schemas.chat import (
-    ChatRequest,
-    ChatResponse,
     ConversationDetailResponse,
     ConversationSummaryResponse,
 )
@@ -21,141 +36,405 @@ router = APIRouter(
 )
 
 
-def create_title(prompt: str) -> str:
-    cleaned = " ".join(prompt.split())
+# ============================================================
+# Request schemas
+# ============================================================
+
+
+class CreateConversationRequest(
+    BaseModel
+):
+    first_prompt: str = Field(
+        min_length=1,
+        max_length=5000,
+    )
+
+
+class SaveMessageRequest(
+    BaseModel
+):
+    role: str = Field(
+        min_length=1,
+        max_length=20,
+    )
+
+    content: str = Field(
+        min_length=1,
+    )
+
+    source_type: str | None = None
+    
+    report_payload: dict | None = None
+
+class RenameConversationRequest(
+    BaseModel
+):
+    title: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+# ============================================================
+# Helpers
+# ============================================================
+
+
+def create_title(
+    prompt: str,
+) -> str:
+    cleaned = " ".join(
+        prompt.split()
+    )
 
     if len(cleaned) <= 60:
         return cleaned
 
-    return cleaned[:57] + "..."
-
-
-@router.get(
-    "/conversations",
-    response_model=list[ConversationSummaryResponse],
-)
-def list_conversations(
-    database: Session = Depends(get_db),
-):
-    statement = select(Conversation).order_by(
-        Conversation.updated_at.desc()
+    return (
+        cleaned[:57]
+        + "..."
     )
 
-    return list(database.scalars(statement).all())
 
-
-@router.get(
-    "/conversations/{conversation_id}",
-    response_model=ConversationDetailResponse,
-)
-def get_conversation(
+def get_or_404(
+    database: Session,
     conversation_id: int,
-    database: Session = Depends(get_db),
-):
-    statement = (
-        select(Conversation)
-        .options(
-            selectinload(Conversation.messages)
-        )
-        .where(
-            Conversation.id == conversation_id
+) -> Conversation:
+    conversation = (
+        database.get(
+            Conversation,
+            conversation_id,
         )
     )
-
-    conversation = database.scalar(statement)
 
     if conversation is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Conversation not found",
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+            ),
+            detail=(
+                "Conversation not found"
+            ),
         )
 
     return conversation
 
 
-@router.post(
-    "/message",
-    response_model=ChatResponse,
+# ============================================================
+# List conversations
+# ============================================================
+
+
+@router.get(
+    "/conversations",
+    response_model=list[
+        ConversationSummaryResponse
+    ],
 )
-def send_message(
-    payload: ChatRequest,
-    database: Session = Depends(get_db),
+def list_conversations(
+    database: Session = Depends(
+        get_db
+    ),
 ):
-    prompt = payload.prompt.strip()
-
-    if payload.conversation_id is None:
-        conversation = Conversation(
-            title=create_title(prompt)
+    statement = (
+        select(
+            Conversation
         )
-
-        database.add(conversation)
-        database.flush()
-
-    else:
-        conversation = database.get(
-            Conversation,
-            payload.conversation_id,
+        .order_by(
+            Conversation
+            .updated_at
+            .desc()
         )
-
-        if conversation is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conversation not found",
-            )
-
-    user_message = ChatMessage(
-        conversation_id=conversation.id,
-        role="user",
-        content=prompt,
-        source_type="user",
     )
 
-    database.add(user_message)
-    database.flush()
-
-    response_text, source_type = generate_nibgpt_response(
-        database=database,
-        prompt=prompt,
-    )
-
-    assistant_message = ChatMessage(
-        conversation_id=conversation.id,
-        role="assistant",
-        content=response_text,
-        source_type=source_type,
-    )
-
-    database.add(assistant_message)
-
-    conversation.updated_at = datetime.utcnow()
-
-    database.commit()
-    database.refresh(assistant_message)
-
-    return ChatResponse(
-        conversation_id=conversation.id,
-        message=assistant_message,
+    return list(
+        database
+        .scalars(
+            statement
+        )
+        .all()
     )
 
 
-@router.delete(
+# ============================================================
+# Get one conversation
+# ============================================================
+
+
+@router.get(
     "/conversations/{conversation_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=(
+        ConversationDetailResponse
+    ),
 )
-def delete_conversation(
+def get_conversation(
     conversation_id: int,
-    database: Session = Depends(get_db),
+    database: Session = Depends(
+        get_db
+    ),
 ):
-    conversation = database.get(
-        Conversation,
-        conversation_id,
+    statement = (
+        select(
+            Conversation
+        )
+        .options(
+            selectinload(
+                Conversation.messages
+            )
+        )
+        .where(
+            Conversation.id
+            == conversation_id
+        )
+    )
+
+    conversation = (
+        database.scalar(
+            statement
+        )
     )
 
     if conversation is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Conversation not found",
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+            ),
+            detail=(
+                "Conversation not found"
+            ),
         )
 
-    database.delete(conversation)
+    return conversation
+
+
+# ============================================================
+# Create conversation
+# ============================================================
+
+
+@router.post(
+    "/conversations",
+    response_model=(
+        ConversationSummaryResponse
+    ),
+)
+def create_conversation(
+    payload: CreateConversationRequest,
+    database: Session = Depends(
+        get_db
+    ),
+):
+    first_prompt = (
+        payload
+        .first_prompt
+        .strip()
+    )
+
+    conversation = Conversation(
+        title=create_title(
+            first_prompt
+        )
+    )
+
+    database.add(
+        conversation
+    )
+
+    database.commit()
+    database.refresh(
+        conversation
+    )
+
+    return conversation
+
+
+# ============================================================
+# Save message
+#
+# This endpoint DOES NOT generate AI.
+#
+# NIBGPTPage does:
+#
+# user prompt
+# -> orchestrator
+# -> reporting / knowledge / stream
+#
+# Then this endpoint stores the result.
+# ============================================================
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages",
+)
+def save_message(
+    conversation_id: int,
+    payload: SaveMessageRequest,
+    database: Session = Depends(
+        get_db
+    ),
+):
+    conversation = get_or_404(
+        database=database,
+        conversation_id=(
+            conversation_id
+        ),
+    )
+
+    role = (
+        payload
+        .role
+        .strip()
+        .lower()
+    )
+
+    if role not in {
+        "user",
+        "assistant",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Role must be "
+                "'user' or 'assistant'."
+            ),
+        )
+
+    content = (
+        payload
+        .content
+        .strip()
+    )
+
+    if not content:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Message content "
+                "cannot be empty."
+            ),
+        )
+
+    message = ChatMessage(
+    conversation_id=conversation.id,
+    role=role,
+    content=content,
+    source_type=payload.source_type,
+    report_payload=(
+        payload.report_payload
+    ),
+)
+
+    database.add(
+        message
+    )
+
+    conversation.updated_at = (
+        datetime.utcnow()
+    )
+
+    database.commit()
+    database.refresh(
+        message
+    )
+
+    return {
+        "id": message.id,
+        "conversation_id": (
+            message.conversation_id
+        ),
+        "role": message.role,
+        "content": message.content,
+        "source_type": (
+            message.source_type
+        ),
+        "report_payload": (
+            message.report_payload
+        ),
+        "created_at": (
+            message.created_at
+        ),
+    }
+    
+    
+# ============================================================
+# Rename conversation
+# ============================================================
+
+
+@router.patch(
+    "/conversations/{conversation_id}",
+    response_model=(
+        ConversationSummaryResponse
+    ),
+)
+def rename_conversation(
+    conversation_id: int,
+    payload: RenameConversationRequest,
+    database: Session = Depends(
+        get_db
+    ),
+):
+    conversation = get_or_404(
+        database=database,
+        conversation_id=(
+            conversation_id
+        ),
+    )
+
+    title = (
+        " ".join(
+            payload
+            .title
+            .split()
+        )
+    )
+
+    if not title:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Conversation title "
+                "cannot be empty."
+            ),
+        )
+
+    conversation.title = title
+    conversation.updated_at = (
+        datetime.utcnow()
+    )
+
+    database.commit()
+    database.refresh(
+        conversation
+    )
+
+    return conversation
+
+
+# ============================================================
+# Delete conversation
+# ============================================================
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=(
+        status.HTTP_204_NO_CONTENT
+    ),
+)
+def delete_conversation(
+    conversation_id: int,
+    database: Session = Depends(
+        get_db
+    ),
+):
+    conversation = get_or_404(
+        database=database,
+        conversation_id=(
+            conversation_id
+        ),
+    )
+
+    database.delete(
+        conversation
+    )
+
     database.commit()

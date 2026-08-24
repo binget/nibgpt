@@ -8,6 +8,7 @@ import {
   SettingsOutlined,
   SmartToyOutlined,
   StorageOutlined,
+  AutoAwesomeOutlined,
 } from "@mui/icons-material";
 import {
   Box,
@@ -31,6 +32,11 @@ const menuItems: MenuItem[] = [
     path: "/dashboard",
     icon: <DashboardOutlined />,
   },
+  {
+  text: "NIBGPT AI",
+  path: "/nibgpt",
+  icon: <AutoAwesomeOutlined />,
+},
   {
     text: "AI Chat",
     path: "/chat",

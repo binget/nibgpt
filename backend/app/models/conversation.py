@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.session import Base
@@ -71,6 +71,11 @@ class ChatMessage(Base):
 
     source_type: Mapped[str | None] = mapped_column(
         String(50),
+        nullable=True,
+    )
+    
+    report_payload: Mapped[dict | None] = mapped_column(
+        JSON,
         nullable=True,
     )
 

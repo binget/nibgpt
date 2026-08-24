@@ -67,6 +67,21 @@ from app.api.query_executor import (
     router as query_executor_router,
 )
 
+from app.api.business_measures import (
+    router as business_measures_router,
+)
+
+from app.api.business_dimensions import (
+    router as business_dimensions_router,
+)
+
+from app.api.orchestrator import (
+    router as orchestrator_router,
+)
+
+from app.api.stream import (
+    router as stream_router,
+)
 
 app = FastAPI(
     title="NibGPT API",
@@ -107,6 +122,10 @@ app.include_router(business_join_mappings_router)
 app.include_router(sql_compiler_router)
 app.include_router(business_rules_router)
 app.include_router(query_executor_router)
+app.include_router(business_measures_router)
+app.include_router(business_dimensions_router)
+app.include_router(orchestrator_router)
+app.include_router(stream_router)
 
 @app.get("/")
 def home():

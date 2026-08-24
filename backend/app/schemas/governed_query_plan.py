@@ -270,6 +270,14 @@ class GovernedQueryPlanResponse(BaseModel):
         | None
     )
 
+    aggregations: list[
+        GovernedPlanAggregationResponse
+    ]
+
+    group_by: list[
+        GovernedPlanGroupingResponse
+    ]
+
     group_by: list[
         GovernedPlanGroupingResponse
     ]

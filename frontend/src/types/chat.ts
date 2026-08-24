@@ -1,9 +1,14 @@
+
 export interface ChatMessage {
   id: number;
   conversation_id: number;
   role: "user" | "assistant";
   content: string;
   source_type: string | null;
+  report_payload?: Record<
+    string,
+    any
+  > | null;
   created_at: string;
 }
 

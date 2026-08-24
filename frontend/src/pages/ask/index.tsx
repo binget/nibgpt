@@ -16,12 +16,20 @@ import type {
   QueryExecutionResponse,
 } from "../../types/queryExecutor";
 
+import * as XLSX from "xlsx";
 
 type ResultTab =
   | "data"
   | "sql"
   | "governance";
 
+  type AskMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  result?: QueryExecutionResponse;
+  createdAt: string;
+};
 
 export default function AskNIBGPTPage() {
   const [prompt, setPrompt] =
@@ -29,6 +37,9 @@ export default function AskNIBGPTPage() {
 
   const [loading, setLoading] =
     useState(false);
+
+  const [messages, setMessages] =
+  useState<AskMessage[]>([]);
 
   const processingMessages = [
   "Understanding your question...",
@@ -101,9 +112,22 @@ const [rowsPerPage, setRowsPerPage] =
       return;
     }
 
+    const userMessage: AskMessage = {
+  id: `user-${Date.now()}`,
+  role: "user",
+  content: cleanPrompt,
+  createdAt: new Date().toISOString(),
+};
+
+setMessages((current) => [
+  ...current,
+  userMessage,
+]);
+
+setPrompt("");
+
     setLoading(true);
     setError(null);
-    setResult(null);
     setActiveTab("data");
     setCurrentPage(1);
 
@@ -118,6 +142,21 @@ const [rowsPerPage, setRowsPerPage] =
         });
 
       setResult(response);
+
+      const assistantMessage: AskMessage = {
+  id: `assistant-${Date.now()}`,
+  role: "assistant",
+  content:
+    response.answer ||
+    buildAnswer(response),
+  result: response,
+  createdAt: new Date().toISOString(),
+};
+
+setMessages((current) => [
+  ...current,
+  assistantMessage,
+]);
 
       if (!response.success) {
         setError(
@@ -241,6 +280,358 @@ const paginatedRows =
     startIndex,
     startIndex + rowsPerPage
   ) ?? [];
+
+const downloadCSV = (
+  report: QueryExecutionResponse,
+  reportPrompt: string
+) => {
+  if (
+    !report ||
+    !report.success ||
+    !report.columns?.length ||
+    !report.rows?.length
+  ) {
+    return;
+  }
+
+  const escapeCSVValue = (
+    value: unknown
+  ) => {
+    if (
+      value === null ||
+      value === undefined
+    ) {
+      return "";
+    }
+
+    const text = String(
+      value
+    );
+
+    return `"${text.replace(
+      /"/g,
+      '""'
+    )}"`;
+  };
+
+  const header = report.columns
+    .map(
+      (column) =>
+        escapeCSVValue(
+          column
+        )
+    )
+    .join(",");
+
+  const body = report.rows
+    .map((row) =>
+      report.columns
+        .map(
+          (column) =>
+            escapeCSVValue(
+              row[column]
+            )
+        )
+        .join(",")
+    )
+    .join("\n");
+
+  const csvContent = [
+    header,
+    body,
+  ].join("\n");
+
+  const blob = new Blob(
+    [
+      "\uFEFF",
+      csvContent,
+    ],
+    {
+      type:
+        "text/csv;charset=utf-8;",
+    }
+  );
+
+  const url =
+    URL.createObjectURL(
+      blob
+    );
+
+  const link =
+    document.createElement(
+      "a"
+    );
+
+  const today =
+    new Date()
+      .toISOString()
+      .slice(
+        0,
+        10
+      );
+
+  const cleanPrompt = reportPrompt
+    .trim()
+    .replace(
+      /[^a-zA-Z0-9\s_-]/g,
+      ""
+    )
+    .replace(
+      /\s+/g,
+      "_"
+    )
+    .slice(
+      0,
+      60
+    );
+
+  link.href = url;
+
+  link.download = (
+    `NIBGPT_${
+      cleanPrompt ||
+      "Report"
+    }_${today}.csv`
+  );
+
+  document.body.appendChild(
+    link
+  );
+
+  link.click();
+
+  document.body.removeChild(
+    link
+  );
+
+  URL.revokeObjectURL(
+    url
+  );
+};
+
+const downloadExcel = (
+  report: QueryExecutionResponse,
+  reportPrompt: string
+) => {
+  if (
+    !report ||
+    !report.success ||
+    !report.columns?.length ||
+    !report.rows?.length
+  ) {
+    return;
+  }
+
+  const worksheetData = report.rows.map(
+    (row) => {
+      const record: Record<
+        string,
+        string | number
+      > = {};
+
+      report.columns.forEach(
+        (column) => {
+          const value =
+            row[column];
+
+          if (
+            typeof value ===
+            "number"
+          ) {
+            record[column] =
+              value;
+          } else if (
+            value === null ||
+            value === undefined
+          ) {
+            record[column] =
+              "";
+          } else {
+            record[column] =
+              String(value);
+          }
+        }
+      );
+
+      return record;
+    }
+  );
+
+  const worksheet =
+    XLSX.utils.json_to_sheet(
+      worksheetData,
+      {
+        header:
+          report.columns,
+      }
+    );
+
+  // --------------------------------------------------
+  // Auto-size columns
+  // --------------------------------------------------
+
+  worksheet["!cols"] =
+    report.columns.map(
+      (column) => {
+        let maxLength =
+          column.length;
+
+        report.rows.forEach(
+          (row) => {
+            const value =
+              row[column];
+
+            const text =
+              value === null ||
+              value === undefined
+                ? ""
+                : String(
+                    value
+                  );
+
+            maxLength =
+              Math.max(
+                maxLength,
+                text.length
+              );
+          }
+        );
+
+        return {
+          wch: Math.min(
+            Math.max(
+              maxLength + 2,
+              12
+            ),
+            40
+          ),
+        };
+      }
+    );
+
+  // --------------------------------------------------
+  // Format numeric cells
+  //
+  // Count:
+  // 1,260,863
+  //
+  // Balance:
+  // 12,540,320.50
+  // --------------------------------------------------
+
+  const range =
+    XLSX.utils.decode_range(
+      worksheet["!ref"] ||
+        "A1:A1"
+    );
+
+  for (
+    let rowIndex =
+      range.s.r + 1;
+    rowIndex <= range.e.r;
+    rowIndex++
+  ) {
+    for (
+      let columnIndex =
+        range.s.c;
+      columnIndex <=
+      range.e.c;
+      columnIndex++
+    ) {
+      const address =
+        XLSX.utils.encode_cell(
+          {
+            r: rowIndex,
+            c: columnIndex,
+          }
+        );
+
+      const cell =
+        worksheet[address];
+
+      if (
+        !cell ||
+        cell.t !== "n"
+      ) {
+        continue;
+      }
+
+      const columnName =
+        report.columns[
+          columnIndex
+        ] || "";
+
+      const normalizedColumn =
+        columnName.toLowerCase();
+
+      if (
+        normalizedColumn.includes(
+          "count"
+        )
+      ) {
+        cell.z = "#,##0";
+      } else if (
+        normalizedColumn.includes(
+          "balance"
+        )
+        ||
+        normalizedColumn.includes(
+          "amount"
+        )
+      ) {
+        cell.z =
+          "#,##0.00";
+      } else {
+        cell.z =
+          "#,##0.##";
+      }
+    }
+  }
+
+  const workbook =
+    XLSX.utils.book_new();
+
+  XLSX.utils.book_append_sheet(
+    workbook,
+    worksheet,
+    "NIBGPT Report"
+  );
+
+  const today =
+    new Date()
+      .toISOString()
+      .slice(
+        0,
+        10
+      );
+
+  const cleanPrompt =
+    prompt
+      .trim()
+      .replace(
+        /[^a-zA-Z0-9\s_-]/g,
+        ""
+      )
+      .replace(
+        /\s+/g,
+        "_"
+      )
+      .slice(
+        0,
+        60
+      );
+
+  const fileName =
+    `NIBGPT_${
+      cleanPrompt ||
+      "Report"
+    }_${today}.xlsx`;
+
+  XLSX.writeFile(
+    workbook,
+    fileName
+  );
+};
 
   return (
     <div
@@ -555,30 +946,123 @@ const paginatedRows =
             </div>
 
             <div
-              style={{
-                display: "flex",
-                gap: "16px",
-                color: "#64748b",
-                fontSize: "13px",
-              }}
-            >
-              <span>
-                {result.row_count} rows
-              </span>
+  style={{
+    display: "flex",
+    alignItems: "center",
+    gap: "14px",
+    flexWrap: "wrap",
+  }}
+>
+  <span
+    style={{
+      color: "#64748b",
+      fontSize: "13px",
+    }}
+  >
+    {result.row_count} rows
+  </span>
 
-              <span>
-                {result.execution_time_ms ?? 0} ms
-              </span>
+  <span
+    style={{
+      color: "#64748b",
+      fontSize: "13px",
+    }}
+  >
+    {
+      result.execution_time_ms ??
+      0
+    }{" "}
+    ms
+  </span>
 
-              <span
-                style={{
-                  color: "#15803d",
-                  fontWeight: 600,
-                }}
-              >
-                {result.decision}
-              </span>
-            </div>
+  <span
+    style={{
+      color: "#15803d",
+      fontWeight: 600,
+      fontSize: "13px",
+    }}
+  >
+    {result.decision}
+  </span>
+
+  <button
+    type="button"
+    onClick={() =>
+  downloadCSV(
+    result,
+    prompt
+  )
+}
+    disabled={
+      !result.rows?.length
+    }
+    style={{
+      border:
+        "1px solid #d6b36a",
+      background:
+        "linear-gradient(135deg, #fffaf1, #ffffff)",
+      color: "#5b311b",
+      borderRadius:
+        "8px",
+      padding:
+        "8px 14px",
+      fontSize:
+        "13px",
+      fontWeight:
+        700,
+      cursor:
+        result.rows?.length
+          ? "pointer"
+          : "not-allowed",
+      display:
+        "inline-flex",
+      alignItems:
+        "center",
+      gap: "7px",
+    }}
+  >
+    ↓ Download CSV
+  </button>
+
+  <button
+  type="button"
+  onClick={() =>
+  downloadExcel(
+    result,
+    prompt
+  )
+}
+  disabled={
+    !result.rows?.length
+  }
+  style={{
+    border:
+      "1px solid #15803d",
+    background:
+      "linear-gradient(135deg, #f0fdf4, #ffffff)",
+    color: "#166534",
+    borderRadius:
+      "8px",
+    padding:
+      "8px 14px",
+    fontSize:
+      "13px",
+    fontWeight:
+      700,
+    cursor:
+      result.rows?.length
+        ? "pointer"
+        : "not-allowed",
+    display:
+      "inline-flex",
+    alignItems:
+      "center",
+    gap: "7px",
+  }}
+>
+  ↓ Download Excel
+</button>
+</div>
           </div>
 
 

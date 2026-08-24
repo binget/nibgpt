@@ -456,6 +456,30 @@ def compile_filter(
         column.column_name,
         dialect,
     )
+    if (
+        planned_filter.operator
+        == "deposit_balance_1011_positive"
+    ):
+        category_reference = column_reference(
+            alias,
+            "CATEGORY",
+            dialect,
+        )
+
+        balance_reference = column_reference(
+            alias,
+            "WORKINGBALANCE",
+            dialect,
+        )
+
+        return (
+            (
+                f"({category_reference} <> '1011' "
+                f"OR {balance_reference} > 0)"
+            ),
+            [],
+            parameter_index,
+        )
 
     operator = planned_filter.operator
 
@@ -932,13 +956,33 @@ def compile_governed_plan(
         )
 
     # Aggregation
-    if (
-        plan.aggregation
-        and plan.aggregation.table
-    ):
-        required_table_ids.add(
-            plan.aggregation.table.table.id
+        # --------------------------------------------------
+    # Aggregations
+    #
+    # Support both:
+    #
+    # legacy single aggregation
+    # plan.aggregation
+    #
+    # and new multi-measure reports
+    # plan.aggregations
+    # --------------------------------------------------
+
+    effective_aggregations = (
+        plan.aggregations
+        if plan.aggregations
+        else (
+            [plan.aggregation]
+            if plan.aggregation
+            else []
         )
+    )
+
+    for aggregation in effective_aggregations:
+        if aggregation.table:
+            required_table_ids.add(
+                aggregation.table.table.id
+            )
 
     # Approved physical joins
     for mapping in (
@@ -1142,18 +1186,30 @@ def compile_governed_plan(
             )
         )
 
-    if plan.aggregation:
-        selected_expressions.append(
-            compile_aggregation(
-                aggregation=(
-                    plan.aggregation
-                ),
-                table_aliases=(
-                    table_aliases
-                ),
-                dialect=dialect,
-            )
+        effective_aggregations = (
+        plan.aggregations
+        if plan.aggregations
+        else (
+            [plan.aggregation]
+            if plan.aggregation
+            else []
         )
+    )
+
+    if effective_aggregations:
+        for aggregation in effective_aggregations:
+            selected_expressions.append(
+                compile_aggregation(
+                    aggregation=(
+                        aggregation
+                    ),
+                    table_aliases=(
+                        table_aliases
+                    ),
+                    dialect=dialect,
+                )
+            )
+
     else:
         for item in plan.selected_columns:
             table = item.table.table
@@ -1581,6 +1637,73 @@ def compile_governed_plan(
             f"{reference} "
             f"{direction}"
             f"{null_ordering}"
+        )
+
+        # --------------------------------------------------
+    # Grouped COUNT ranking
+    #
+    # COUNT(*) has no resolved physical column, so the
+    # normal PlannedSort path cannot create an ORDER BY.
+    #
+    # Examples:
+    #
+    # "Show top 10 branches by number of active accounts"
+    #     -> ORDER BY COUNT(*) DESC
+    #
+    # "Show bottom 5 districts by inactive account count"
+    #     -> ORDER BY COUNT(*) ASC
+    # --------------------------------------------------
+
+    normalized_prompt = (
+        plan.normalized_prompt
+        or ""
+    )
+
+    ranking_words = {
+        "top",
+        "bottom",
+        "highest",
+        "lowest",
+        "largest",
+        "smallest",
+        "most",
+        "least",
+    }
+
+    prompt_words = set(
+        normalized_prompt.split()
+    )
+
+    is_count_ranking = (
+        plan.aggregation is not None
+        and plan.aggregation.function
+        == "count"
+        and bool(
+            plan.group_by
+        )
+        and bool(
+            prompt_words
+            & ranking_words
+        )
+    )
+
+    if (
+        is_count_ranking
+        and not order_by_expressions
+    ):
+        count_direction = "DESC"
+
+        if (
+            "bottom" in prompt_words
+            or "lowest" in prompt_words
+            or "smallest" in prompt_words
+            or "least" in prompt_words
+        ):
+            count_direction = "ASC"
+
+        order_by_expressions.append(
+            f"COUNT(*) "
+            f"{count_direction}"
         )
 
     sql_parts = [

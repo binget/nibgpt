@@ -49,6 +49,8 @@ ALLOWED_OPERATORS = {
     "like",
     "not like",
     "between_or_between",
+    "is_null",
+    "is_not_null",
 }
 
 

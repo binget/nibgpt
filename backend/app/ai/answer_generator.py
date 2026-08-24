@@ -217,6 +217,9 @@ def is_count_column(
         or normalized.startswith(
             "count_"
         )
+        or normalized.endswith(
+            "_count"
+        )
     )
 
 
@@ -227,25 +230,109 @@ def clean_count_subject(
         prompt
     )
 
-    for prefix in [
+    # --------------------------------------------------
+    # Known business-facing subjects
+    # --------------------------------------------------
+
+    if (
+        "inactive account"
+        in normalized
+        or "inactive accounts"
+        in normalized
+    ):
+        return "inactive accounts"
+
+    if (
+        "active account"
+        in normalized
+        or "active accounts"
+        in normalized
+    ):
+        return "active accounts"
+
+    if (
+        "customer"
+        in normalized
+        or "customers"
+        in normalized
+    ):
+        return "customers"
+
+    if (
+        "account"
+        in normalized
+        or "accounts"
+        in normalized
+    ):
+        return "accounts"
+
+    if (
+        "branch"
+        in normalized
+        or "branches"
+        in normalized
+    ):
+        return "branches"
+
+    if (
+        "district"
+        in normalized
+        or "districts"
+        in normalized
+    ):
+        return "districts"
+
+    # --------------------------------------------------
+    # Generic cleanup
+    # --------------------------------------------------
+
+    cleaned = normalized
+
+    prefixes = [
+        "how many ",
+        "show me how many ",
+        "tell me how many ",
         "show ",
         "display ",
         "give me ",
         "tell me ",
         "count ",
         "show me ",
-    ]:
-        if normalized.startswith(
+    ]
+
+    for prefix in prefixes:
+        if cleaned.startswith(
             prefix
         ):
-            normalized = (
-                normalized[
-                    len(prefix):
-                ]
-            )
+            cleaned = cleaned[
+                len(prefix):
+            ].strip()
+
             break
 
-    return normalized.strip()
+    # Remove common question endings.
+    cleaned = re.sub(
+        r"\b(?:are there|do we have|exist)\b",
+        "",
+        cleaned,
+    )
+
+    cleaned = re.sub(
+        r"[?.!]+$",
+        "",
+        cleaned,
+    )
+
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        cleaned,
+    ).strip()
+
+    return (
+        cleaned
+        or "records"
+    )
 
 
 def detect_business_context(

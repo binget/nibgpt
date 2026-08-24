@@ -18,6 +18,7 @@ import ReasoningExplorerPage from "./pages/reasoning/ReasoningExplorerPage";
 import SqlCompilerPage from "./pages/sql-compiler/SqlCompilerPage";
 import BusinessRuleRegistryPage from "./pages/business-rules/BusinessRuleRegistryPage";
 import AskNIBGPTPage from "./pages/ask";
+import NIBGPTPage from "./pages/nibgpt/NIBGPTPage";
 
 function App() {
   return (
@@ -27,6 +28,11 @@ function App() {
       <Route element={<ProtectedRoute />}>
         <Route element={<MainLayout />}>
           <Route path="/dashboard" element={<DashboardPage />} />
+
+          <Route
+  path="/nibgpt"
+  element={<NIBGPTPage />}
+/>
 
           <Route
             path="/chat"
@@ -113,6 +119,7 @@ function App() {
     <BusinessRuleRegistryPage />
   }
 />
+
 
           <Route
             path="/knowledge-base"

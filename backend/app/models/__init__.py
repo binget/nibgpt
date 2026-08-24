@@ -25,6 +25,14 @@ from app.models.business_rule import (
     BusinessRule,
 )
 
+from app.models.business_measure import (
+    BusinessMeasure,
+)
+
+from app.models.business_dimension import (
+    BusinessDimension,
+)
+
 
 
 __all__ = [
@@ -41,4 +49,6 @@ __all__ = [
     "BusinessCapability",
     "BusinessCapabilityEntityMap",
     "BusinessRelationshipJoinMapping",
+    "BusinessMeasure",
+    "BusinessDimension",
 ]

@@ -2,6 +2,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from click import prompt
+
 from sqlalchemy.orm import Session
 
 from app.ai.entity_extractor import (
@@ -21,6 +23,18 @@ from sqlalchemy.orm import joinedload
 
 from app.models.business_join_mapping import (
     BusinessRelationshipJoinMapping,
+)
+
+from app.models.business_rule import (
+    BusinessRule,
+)
+
+from app.models.business_measure import (
+    BusinessMeasure,
+)
+
+from app.models.business_dimension import (
+    BusinessDimension,
 )
 
 
@@ -205,9 +219,16 @@ class GovernedPlan:
         PlannedFilter
     ] = field(default_factory=list)
 
+    # Existing single aggregation.
+    # Keep this for backward compatibility.
     aggregation: (
         PlannedAggregation | None
     ) = None
+
+    # New multi-measure support.
+    aggregations: list[
+        PlannedAggregation
+    ] = field(default_factory=list)
 
     group_by: list[
         PlannedGrouping
@@ -796,99 +817,21 @@ def build_status_filters(
             )
         )
 
-                # --------------------------------------------------
+        # --------------------------------------------------
         # Core Banking account activity
         #
-        # FBNK_ACCOUNT.INACTIVMARKER:
+        # Active / inactive account semantics are handled
+        # by governed BusinessRule entries inside
+        # build_attribute_filters().
         #
-        # NULL = Active
-        # Y    = Inactive
+        # Do not create another INACTIVMARKER filter here.
         # --------------------------------------------------
 
         if normalized_status in {
             "active",
             "inactive",
         }:
-            account_filter_added = False
-
-            for resolved_table in physical_tables:
-                entity_name = normalize_text(
-                    resolved_table.entity.name
-                )
-
-                table_name = normalize_text(
-                    resolved_table.table.table_name
-                )
-
-                if (
-                    entity_name not in {
-                        "account",
-                        "accounts",
-                        "fbnk account",
-                    }
-                    and table_name != "fbnk_account"
-                ):
-                    continue
-
-                for column in (
-                    resolved_table.table.columns
-                ):
-                    if (
-                        normalize_text(
-                            column.column_name
-                        )
-                        != "inactivmarker"
-                    ):
-                        continue
-
-                    resolved_column = ResolvedColumn(
-                        column=column,
-                        confidence=100,
-                        matched_terms=[
-                            normalized_status
-                        ],
-                    )
-
-                    if normalized_status == "inactive":
-                        operator = "="
-                        value = "Y"
-                        rule_text = (
-                            "INACTIVMARKER = 'Y'"
-                        )
-                    else:
-                        operator = "is_null"
-                        value = None
-                        rule_text = (
-                            "INACTIVMARKER IS NULL"
-                        )
-
-                    filters.append(
-                        PlannedFilter(
-                            table=resolved_table,
-                            resolved_column=(
-                                resolved_column
-                            ),
-                            operator=operator,
-                            value=value,
-                            confidence=100,
-                            reason=(
-                                "Core Banking account "
-                                f"activity rule: "
-                                f"{normalized_status} "
-                                "account means "
-                                f"{rule_text}."
-                            ),
-                        )
-                    )
-
-                    account_filter_added = True
-                    break
-
-                if account_filter_added:
-                    break
-
-            if account_filter_added:
-                continue
+            continue
 
         # --------------------------------------------------
         # Expiry language
@@ -982,14 +925,135 @@ def build_attribute_filters(
         prompt
     )
 
-    prompt_words = set(
-        normalized_prompt.split()
-    )
-
     matched_rule_ids: set[int] = set()
 
     # --------------------------------------------------
-    # 1. Load approved metadata-driven rules
+    # Helper: whole-word / whole-phrase matching
+    #
+    # Prevents:
+    #
+    # "active" matching "inactive"
+    #
+    # Supports:
+    #
+    # deposit
+    # deposit balance
+    # active account
+    # etc.
+    # --------------------------------------------------
+
+    def phrase_matches(
+        phrase: str,
+    ) -> bool:
+        normalized_phrase = normalize_text(
+            phrase
+        )
+
+        if not normalized_phrase:
+            return False
+
+        pattern = (
+            r"(?<![a-z0-9])"
+            + re.escape(
+                normalized_phrase
+            )
+            + r"(?![a-z0-9])"
+        )
+
+        return (
+            re.search(
+                pattern,
+                normalized_prompt,
+            )
+            is not None
+        )
+
+    # --------------------------------------------------
+    # Determine whether the question is about accounts.
+    #
+    # Normal account analytics must use the governed
+    # customer/deposit account scope.
+    #
+    # FBNK_ACCOUNT.CATEGORY:
+    #
+    # 1001 - 1099
+    # 6501 - 6600
+    # --------------------------------------------------
+
+    account_scope_prompt = (
+        phrase_matches(
+            "account"
+        )
+        or phrase_matches(
+            "accounts"
+        )
+        or phrase_matches(
+            "account balance"
+        )
+        or phrase_matches(
+            "account balances"
+        )
+        or phrase_matches(
+            "deposit"
+        )
+        or phrase_matches(
+            "deposits"
+        )
+        or phrase_matches(
+            "deposit balance"
+        )
+        or phrase_matches(
+            "deposit balances"
+        )
+        or phrase_matches(
+            "number of accounts"
+        )
+        or phrase_matches(
+            "number of account"
+        )
+        or phrase_matches(
+            "how many accounts"
+        )
+        or phrase_matches(
+            "how many account"
+        )
+        or phrase_matches(
+            "account report"
+        )
+    )
+
+    # --------------------------------------------------
+    # Deposit BALANCE calculation.
+    #
+    # This is deliberately separate from account count.
+    #
+    # CATEGORY 1011 remains part of the deposit scope,
+    # but for balance calculations we include CATEGORY
+    # 1011 only when WORKINGBALANCE > 0.
+    # --------------------------------------------------
+
+    deposit_balance_prompt = (
+        phrase_matches(
+            "deposit balance"
+        )
+        or phrase_matches(
+            "deposit balances"
+        )
+        or phrase_matches(
+            "total deposit balance"
+        )
+        or (
+            phrase_matches(
+                "deposit"
+            )
+            and phrase_matches(
+                "balance"
+            )
+        )
+    )
+
+    # --------------------------------------------------
+    # 1. Load approved metadata-driven business rules
     # --------------------------------------------------
 
     statement = (
@@ -999,7 +1063,9 @@ def build_attribute_filters(
         .where(
             BusinessRule.approval_status
             == "approved",
-            BusinessRule.is_active.is_(True),
+            BusinessRule.is_active.is_(
+                True
+            ),
         )
     )
 
@@ -1009,12 +1075,33 @@ def build_attribute_filters(
         ).all()
     )
 
+    # --------------------------------------------------
+    # 2. Apply approved business rules
+    # --------------------------------------------------
+
     for rule in business_rules:
+        if rule.id in matched_rule_ids:
+            continue
+
+        rule_name = normalize_text(
+            rule.name
+        )
+
         trigger = normalize_text(
             rule.trigger_phrase
         )
 
         synonyms: list[str] = []
+
+        # --------------------------------------------------
+        # Parse synonyms.
+        #
+        # Supports JSON:
+        #
+        # ["deposit account", "deposit accounts"]
+        #
+        # and comma separated values.
+        # --------------------------------------------------
 
         if rule.synonyms:
             try:
@@ -1034,6 +1121,9 @@ def build_attribute_filters(
                         )
                         for item
                         in parsed
+                        if str(
+                            item
+                        ).strip()
                     ]
 
             except Exception:
@@ -1042,19 +1132,40 @@ def build_attribute_filters(
                         item
                     )
                     for item
-                    in rule.synonyms.split(",")
+                    in rule.synonyms.split(
+                        ","
+                    )
                     if item.strip()
                 ]
+
+        # --------------------------------------------------
+        # Active / inactive account status is handled
+        # centrally by build_status_filters().
+        #
+        # Do not apply the BusinessRule copy again here,
+        # otherwise:
+        #
+        # INACTIVMARKER = 'Y'
+        #
+        # could appear twice.
+        # --------------------------------------------------
+
+        if rule_name in {
+            "active account",
+            "inactive account",
+        }:
+            continue
+
+        # --------------------------------------------------
+        # Normal trigger matching
+        # --------------------------------------------------
 
         trigger_matches = False
 
         if (
             trigger
-            and (
+            and phrase_matches(
                 trigger
-                in normalized_prompt
-                or trigger
-                in prompt_words
             )
         ):
             trigger_matches = True
@@ -1063,17 +1174,47 @@ def build_attribute_filters(
             for synonym in synonyms:
                 if (
                     synonym
-                    and synonym
-                    in normalized_prompt
+                    and phrase_matches(
+                        synonym
+                    )
                 ):
                     trigger_matches = True
                     break
 
-        if not trigger_matches:
+        # --------------------------------------------------
+        # Force governed deposit-account scope for normal
+        # account reporting.
+        #
+        # This allows prompts such as:
+        #
+        # Show number of active accounts
+        # Show account balance
+        # Show active account report by branch
+        #
+        # to inherit the Deposit Accounts CATEGORY rule
+        # even when the user does not literally say
+        # "deposit".
+        # --------------------------------------------------
+
+        force_account_scope = (
+            account_scope_prompt
+            and rule_name
+            == "deposit accounts"
+        )
+
+        if (
+            not trigger_matches
+            and not force_account_scope
+        ):
             continue
 
-        # Find the physical table already resolved
-        # for the business entity belonging to this rule.
+        # --------------------------------------------------
+        # Find the physical entity/table already selected
+        # by relationship reasoning.
+        # --------------------------------------------------
+
+        rule_applied = False
+
         for resolved_table in physical_tables:
             if (
                 resolved_table.entity.id
@@ -1097,6 +1238,12 @@ def build_attribute_filters(
                 ):
                     continue
 
+                matched_term = (
+                    trigger
+                    if trigger
+                    else rule.name
+                )
+
                 resolved_column = (
                     ResolvedColumn(
                         column=column,
@@ -1104,7 +1251,7 @@ def build_attribute_filters(
                             rule.confidence
                         ),
                         matched_terms=[
-                            trigger
+                            matched_term
                         ],
                     )
                 )
@@ -1115,13 +1262,18 @@ def build_attribute_filters(
                         resolved_column=(
                             resolved_column
                         ),
-                        operator=rule.operator,
-                        value=rule.rule_value,
+                        operator=(
+                            rule.operator
+                        ),
+                        value=(
+                            rule.rule_value
+                        ),
                         confidence=(
                             rule.confidence
                         ),
                         reason=(
-                            "Metadata-driven business rule: "
+                            "Metadata-driven "
+                            "business rule: "
                             f"{rule.name} → "
                             f"{resolved_table.entity.name}."
                             f"{column.column_name} "
@@ -1135,7 +1287,119 @@ def build_attribute_filters(
                     rule.id
                 )
 
-    
+                rule_applied = True
+                break
+
+            if rule_applied:
+                break
+
+    # --------------------------------------------------
+    # 3. Deposit Balance special calculation rule
+    #
+    # CATEGORY 1011 IS included.
+    #
+    # But for CATEGORY 1011:
+    #
+    # WORKINGBALANCE > 0
+    #
+    # Examples:
+    #
+    # CATEGORY=1011 BALANCE=25000   -> include
+    # CATEGORY=1011 BALANCE=0       -> exclude
+    # CATEGORY=1011 BALANCE=-5000   -> exclude
+    #
+    # Other deposit categories are unaffected.
+    #
+    # This filter is NOT applied to account counts.
+    # --------------------------------------------------
+
+    if deposit_balance_prompt:
+        for resolved_table in physical_tables:
+            table_name = (
+                resolved_table
+                .table
+                .table_name
+                .strip()
+                .lower()
+            )
+
+            if table_name != "fbnk_account":
+                continue
+
+            category_column = None
+            working_balance_column = None
+
+            for column in (
+                resolved_table.table.columns
+            ):
+                column_name = normalize_text(
+                    column.column_name
+                )
+
+                if (
+                    column_name
+                    == "category"
+                ):
+                    category_column = column
+
+                elif (
+                    column_name
+                    == "workingbalance"
+                ):
+                    working_balance_column = (
+                        column
+                    )
+
+            # Both physical columns are required for this
+            # governed deposit-balance calculation.
+            if (
+                category_column is None
+                or working_balance_column is None
+            ):
+                continue
+
+            if (
+                not category_column.is_discovered
+                or not category_column.is_enabled
+                or not category_column.ai_access_allowed
+                or not working_balance_column.is_discovered
+                or not working_balance_column.is_enabled
+                or not working_balance_column.ai_access_allowed
+            ):
+                continue
+
+            resolved_column = (
+                ResolvedColumn(
+                    column=category_column,
+                    confidence=100,
+                    matched_terms=[
+                        "deposit balance"
+                    ],
+                )
+            )
+
+            filters.append(
+                PlannedFilter(
+                    table=resolved_table,
+                    resolved_column=(
+                        resolved_column
+                    ),
+                    operator=(
+                        "deposit_balance_1011_positive"
+                    ),
+                    value=None,
+                    confidence=100,
+                    reason=(
+                        "Deposit balance calculation "
+                        "rule: CATEGORY 1011 remains "
+                        "included but only rows where "
+                        "WORKINGBALANCE > 0 contribute "
+                        "to deposit balance."
+                    ),
+                )
+            )
+
+            break
 
     return filters
 
@@ -1176,29 +1440,707 @@ def determine_aggregation_function(
 
     return None
 
+def parse_semantic_phrases(
+    value: str | None,
+) -> list[str]:
+    if not value:
+        return []
 
-def build_aggregation(
-    intent: str,
-    aggregation_terms: list[str],
-    physical_tables: list[object],
-    prompt_terms: list[str],
-) -> PlannedAggregation | None:
-    function = determine_aggregation_function(
-        intent=intent,
-        aggregation_terms=aggregation_terms,
+    value = value.strip()
+
+    if not value:
+        return []
+
+    # JSON array support
+    if value.startswith("["):
+        try:
+            import json
+
+            parsed = json.loads(value)
+
+            if isinstance(parsed, list):
+                return [
+                    normalize_text(str(item))
+                    for item in parsed
+                    if str(item).strip()
+                ]
+        except Exception:
+            pass
+
+    # Fallback for comma-separated values
+    return [
+        normalize_text(item)
+        for item in value.split(",")
+        if item.strip()
+    ]
+
+
+def phrase_in_prompt(
+    phrase: str,
+    prompt: str,
+) -> bool:
+    phrase = normalize_text(phrase)
+    prompt = normalize_text(prompt)
+
+    if not phrase:
+        return False
+
+    pattern = (
+        r"(?<![a-z0-9])"
+        + re.escape(phrase)
+        + r"(?![a-z0-9])"
     )
 
-    if function is None:
+    return (
+        re.search(
+            pattern,
+            prompt,
+        )
+        is not None
+    )
+
+def resolve_semantic_measure(
+    database: Session,
+    prompt: str,
+    physical_tables: list[object],
+) -> PlannedAggregation | None:
+    normalized_prompt = normalize_text(
+        prompt
+    )
+
+    measures = list(
+        database.scalars(
+            select(
+                BusinessMeasure
+            )
+            .where(
+                BusinessMeasure.is_active
+                .is_(True),
+                BusinessMeasure.approval_status
+                == "approved",
+            )
+            .order_by(
+                BusinessMeasure.confidence.desc(),
+                BusinessMeasure.id.asc(),
+            )
+        )
+    )
+
+    best_measure = None
+    best_score = 0
+
+    for measure in measures:
+        phrases = [
+            normalize_text(
+                measure.name
+            ),
+        ]
+
+        phrases.extend(
+            parse_semantic_phrases(
+                measure.trigger_phrases
+            )
+        )
+
+        phrases.extend(
+            parse_semantic_phrases(
+                measure.synonyms
+            )
+        )
+
+        phrases = list(
+            dict.fromkeys(
+                phrase
+                for phrase in phrases
+                if phrase
+            )
+        )
+
+        for phrase in phrases:
+            if not phrase_in_prompt(
+                phrase,
+                normalized_prompt,
+            ):
+                continue
+
+            # Longer phrases are more specific.
+            score = (
+                len(phrase.split()) * 100
+                + len(phrase)
+            )
+
+            # Prefer higher-governance confidence
+            # when phrases are otherwise similar.
+            score += int(
+                measure.confidence or 0
+            )
+
+            if score > best_score:
+                best_score = score
+                best_measure = measure
+
+    if best_measure is None:
         return None
+
+    function = normalize_text(
+        best_measure.aggregation_function
+    )
+
+    # ----------------------------------------------
+    # COUNT(*)
+    # ----------------------------------------------
 
     if function == "count":
         return PlannedAggregation(
             function="count",
             table=None,
             resolved_column=None,
-            alias="record_count",
+            alias=best_measure.name,
+            confidence=best_measure.confidence,
+        )
+
+    # ----------------------------------------------
+    # Column-based measure
+    # ----------------------------------------------
+
+    metadata_column_id = (
+        best_measure.metadata_column_id
+    )
+
+    if metadata_column_id is None:
+        return None
+
+    for resolved_table in physical_tables:
+        for column in (
+            resolved_table.table.columns
+        ):
+            if (
+                column.id
+                != metadata_column_id
+            ):
+                continue
+
+            resolved_column = ResolvedColumn(
+                column=column,
+                confidence=(
+                    best_measure.confidence
+                ),
+                matched_terms=[
+                    best_measure.name
+                ],
+            )
+
+                    # --------------------------------------------------
+        # Context-aware business alias
+        # --------------------------------------------------
+
+        measure_alias = (
+            best_measure.name
+        )
+
+        if (
+            function == "sum"
+            and (
+                "deposit"
+                in normalized_prompt.split()
+                or "deposits"
+                in normalized_prompt.split()
+            )
+            and normalize_text(
+                best_measure.name
+            )
+            == "account balance"
+        ):
+            measure_alias = (
+                "Deposit Balance"
+            )
+
+        return PlannedAggregation(
+            function=function,
+            table=resolved_table,
+            resolved_column=(
+                resolved_column
+            ),
+            alias=measure_alias,
+            confidence=(
+                best_measure.confidence
+            ),
+        )
+
+    return None
+
+def resolve_semantic_measures(
+    database: Session,
+    prompt: str,
+    physical_tables: list[object],
+) -> list[PlannedAggregation]:
+    normalized_prompt = normalize_text(
+        prompt
+    )
+
+    measures = list(
+        database.scalars(
+            select(
+                BusinessMeasure
+            )
+            .where(
+                BusinessMeasure.is_active
+                .is_(True),
+                BusinessMeasure.approval_status
+                == "approved",
+            )
+            .order_by(
+                BusinessMeasure.confidence.desc(),
+                BusinessMeasure.id.asc(),
+            )
+        )
+    )
+
+    matched: list[
+        PlannedAggregation
+    ] = []
+
+    seen_measure_ids: set[int] = set()
+
+    for measure in measures:
+        phrases = [
+            normalize_text(
+                measure.name
+            ),
+        ]
+
+        phrases.extend(
+            parse_semantic_phrases(
+                measure.trigger_phrases
+            )
+        )
+
+        phrases.extend(
+            parse_semantic_phrases(
+                measure.synonyms
+            )
+        )
+
+        phrases = list(
+            dict.fromkeys(
+                phrase
+                for phrase in phrases
+                if phrase
+            )
+        )
+
+        matched_phrase = None
+
+        
+
+        for phrase in phrases:
+            # --------------------------------------------------
+            # 1. Exact whole-phrase match
+            # --------------------------------------------------
+
+            if phrase_in_prompt(
+                phrase,
+                normalized_prompt,
+            ):
+                matched_phrase = phrase
+                break
+
+            # --------------------------------------------------
+            # 2. Flexible semantic token match
+            #
+            # Allows:
+            #
+            # "number of accounts"
+            #
+            # to match:
+            #
+            # "number and balance of active accounts"
+            #
+            # Important stop words are ignored.
+            # --------------------------------------------------
+
+            phrase_words = {
+                word
+                for word
+                in normalize_text(
+                    phrase
+                ).split()
+                if word
+                not in {
+                    "of",
+                    "the",
+                    "a",
+                    "an",
+                    "by",
+                    "for",
+                }
+            }
+
+            prompt_words = set(
+                normalized_prompt.split()
+            )
+
+            if (
+                len(phrase_words) >= 2
+                and phrase_words.issubset(
+                    prompt_words
+                )
+            ):
+                matched_phrase = phrase
+                break
+
+        if matched_phrase is None:
+            continue
+
+        if measure.id in seen_measure_ids:
+            continue
+
+        function = normalize_text(
+            measure.aggregation_function
+        )
+
+        if function == "count":
+            matched.append(
+                PlannedAggregation(
+                    function="count",
+                    table=None,
+                    resolved_column=None,
+                    alias=measure.name,
+                    confidence=(
+                        measure.confidence
+                    ),
+                )
+            )
+
+            seen_measure_ids.add(
+                measure.id
+            )
+
+            continue
+
+        metadata_column_id = (
+            measure.metadata_column_id
+        )
+
+        if metadata_column_id is None:
+            continue
+
+        resolved = False
+
+        for resolved_table in physical_tables:
+            for column in (
+                resolved_table.table.columns
+            ):
+                if (
+                    column.id
+                    != metadata_column_id
+                ):
+                    continue
+
+                resolved_column = (
+                    ResolvedColumn(
+                        column=column,
+                        confidence=(
+                            measure.confidence
+                        ),
+                        matched_terms=[
+                            matched_phrase
+                        ],
+                    )
+                )
+
+                measure_alias = (
+                    measure.name
+                )
+
+                if (
+                    function == "sum"
+                    and (
+                        "deposit"
+                        in normalized_prompt.split()
+                        or "deposits"
+                        in normalized_prompt.split()
+                    )
+                    and normalize_text(
+                        measure.name
+                    )
+                    == "account balance"
+                ):
+                    measure_alias = (
+                        "Deposit Balance"
+                    )
+
+                matched.append(
+                    PlannedAggregation(
+                        function=function,
+                        table=resolved_table,
+                        resolved_column=(
+                            resolved_column
+                        ),
+                        alias=measure_alias,
+                        confidence=(
+                            measure.confidence
+                        ),
+                    )
+                )
+
+                seen_measure_ids.add(
+                    measure.id
+                )
+
+                resolved = True
+                break
+
+            if resolved:
+                break
+
+    return matched
+
+
+def build_aggregation(
+    database: Session,
+    prompt: str,
+    intent: str,
+    aggregation_terms: list[str],
+    physical_tables: list[object],
+    prompt_terms: list[str],
+) -> PlannedAggregation | None:
+
+    semantic_measure = (
+        resolve_semantic_measure(
+            database=database,
+            prompt=prompt,
+            physical_tables=(
+                physical_tables
+            ),
+        )
+    )
+
+    if semantic_measure is not None:
+        return semantic_measure
+
+    function = determine_aggregation_function(
+        intent=intent,
+        aggregation_terms=aggregation_terms,
+    )
+
+    normalized_prompt = normalize_text(
+        " ".join(
+            prompt_terms
+        )
+    )
+
+    # --------------------------------------------------
+    # Explicit measure semantics override generic
+    # intent classification.
+    #
+    # Examples:
+    #
+    # "active account balance"
+    # "inactive account balance"
+    # "active account amount"
+    # "deposit balance"
+    #
+    # These are SUM questions even if the upstream
+    # intent classifier incorrectly classified them
+    # as count.
+    # --------------------------------------------------
+
+    explicit_balance_measure = (
+        "balance"
+        in normalized_prompt.split()
+        or "amount"
+        in normalized_prompt.split()
+    )
+
+    explicit_count_measure = (
+        "how many"
+        in normalized_prompt
+        or "number of"
+        in normalized_prompt
+        or "count"
+        in normalized_prompt.split()
+    )
+
+    if (
+        explicit_balance_measure
+        and not explicit_count_measure
+    ):
+        function = "sum"
+
+    if function is None:
+        return None
+
+    # --------------------------------------------------
+    # COUNT
+    # --------------------------------------------------
+
+    if function == "count":
+        count_alias = (
+            "Record Count"
+        )
+
+        if (
+            "inactive account"
+            in normalized_prompt
+            or "inactive accounts"
+            in normalized_prompt
+        ):
+            count_alias = (
+                "Inactive Account Count"
+            )
+
+        elif (
+            "active account"
+            in normalized_prompt
+            or "active accounts"
+            in normalized_prompt
+        ):
+            count_alias = (
+                "Active Account Count"
+            )
+
+        elif (
+            "customer"
+            in normalized_prompt
+            or "customers"
+            in normalized_prompt
+        ):
+            count_alias = (
+                "Customer Count"
+            )
+
+        elif (
+            "account"
+            in normalized_prompt
+            or "accounts"
+            in normalized_prompt
+        ):
+            count_alias = (
+                "Account Count"
+            )
+
+        return PlannedAggregation(
+            function="count",
+            table=None,
+            resolved_column=None,
+            alias=count_alias,
             confidence=98,
         )
+
+    # --------------------------------------------------
+    # Core Banking balance semantic measure
+    #
+    # These business questions must always use:
+    #
+    # FBNK_ACCOUNT.WORKINGBALANCE
+    #
+    # Examples:
+    #
+    # total deposit balance
+    # total active account balance
+    # total inactive account balance
+    # active account amount
+    # inactive account amount
+    #
+    # Do not allow generic numeric matching to select
+    # VALUE_DATED_BAL or another account balance field.
+    # --------------------------------------------------
+
+    is_account_balance_prompt = (
+        "account balance"
+        in normalized_prompt
+        or "account amount"
+        in normalized_prompt
+        or "deposit balance"
+        in normalized_prompt
+        or "deposit amount"
+        in normalized_prompt
+        or "total deposit"
+        in normalized_prompt
+        or "deposits"
+        in normalized_prompt
+    )
+
+    if (
+        function == "sum"
+        and is_account_balance_prompt
+    ):
+        balance_match = find_best_column(
+            physical_tables=physical_tables,
+            terms=[
+                "working balance",
+                "workingbalance",
+            ],
+            require_numeric=True,
+            exclude_primary_key=True,
+        )
+
+        if balance_match is not None:
+            (
+                resolved_table,
+                resolved_column,
+            ) = balance_match
+
+            column_name = (
+                resolved_column
+                .column
+                .column_name
+            )
+
+            if (
+                column_name.lower()
+                == "workingbalance"
+            ):
+                aggregation_alias = (
+                    "Total Balance"
+                )
+
+                if (
+                    "inactive account"
+                    in normalized_prompt
+                    or "inactive accounts"
+                    in normalized_prompt
+                ):
+                    aggregation_alias = (
+                        "Inactive Account Balance"
+                    )
+
+                elif (
+                    "active account"
+                    in normalized_prompt
+                    or "active accounts"
+                    in normalized_prompt
+                ):
+                    aggregation_alias = (
+                        "Active Account Balance"
+                    )
+
+                elif (
+                    "deposit"
+                    in normalized_prompt
+                    or "deposits"
+                    in normalized_prompt
+                ):
+                    aggregation_alias = (
+                        "Deposit Amount"
+                    )
+
+                return PlannedAggregation(
+                    function="sum",
+                    table=resolved_table,
+                    resolved_column=(
+                        resolved_column
+                    ),
+                    alias=(
+                        aggregation_alias
+                    ),
+                    confidence=99,
+                )
+
+    # --------------------------------------------------
+    # Generic aggregation-column resolution
+    # --------------------------------------------------
 
     match = find_best_column(
         physical_tables=physical_tables,
@@ -1210,11 +2152,11 @@ def build_aggregation(
         exclude_primary_key=True,
     )
 
-    if match is None:
-        normalized_prompt = normalize_text(
-            " ".join(prompt_terms)
-        )
+    # --------------------------------------------------
+    # No numeric measure found
+    # --------------------------------------------------
 
+    if match is None:
         ranking_words = {
             "top",
             "bottom",
@@ -1235,11 +2177,55 @@ def build_aggregation(
             return None
 
         if function == "sum":
+            count_alias = (
+                "Record Count"
+            )
+
+            if (
+                "inactive account"
+                in normalized_prompt
+                or "inactive accounts"
+                in normalized_prompt
+            ):
+                count_alias = (
+                    "Inactive Account Count"
+                )
+
+            elif (
+                "active account"
+                in normalized_prompt
+                or "active accounts"
+                in normalized_prompt
+            ):
+                count_alias = (
+                    "Active Account Count"
+                )
+
+            elif (
+                "customer"
+                in normalized_prompt
+                or "customers"
+                in normalized_prompt
+            ):
+                count_alias = (
+                    "Customer Count"
+                )
+
+            elif (
+                "account"
+                in normalized_prompt
+                or "accounts"
+                in normalized_prompt
+            ):
+                count_alias = (
+                    "Account Count"
+                )
+
             return PlannedAggregation(
                 function="count",
                 table=None,
                 resolved_column=None,
-                alias="record_count",
+                alias=count_alias,
                 confidence=90,
             )
 
@@ -1251,11 +2237,9 @@ def build_aggregation(
     ) = match
 
     column_name = (
-        resolved_column.column.column_name
-    )
-
-    normalized_prompt = normalize_text(
-        " ".join(prompt_terms)
+        resolved_column
+        .column
+        .column_name
     )
 
     # --------------------------------------------------
@@ -1272,6 +2256,26 @@ def build_aggregation(
         == "workingbalance"
     ):
         if (
+            "inactive account"
+            in normalized_prompt
+            or "inactive accounts"
+            in normalized_prompt
+        ):
+            aggregation_alias = (
+                "Inactive Account Balance"
+            )
+
+        elif (
+            "active account"
+            in normalized_prompt
+            or "active accounts"
+            in normalized_prompt
+        ):
+            aggregation_alias = (
+                "Active Account Balance"
+            )
+
+        elif (
             "current account"
             in normalized_prompt
         ):
@@ -1291,6 +2295,8 @@ def build_aggregation(
 
         elif (
             "deposit"
+            in normalized_prompt
+            or "deposits"
             in normalized_prompt
         ):
             aggregation_alias = (
@@ -1312,6 +2318,47 @@ def build_aggregation(
             resolved_column.confidence,
         ),
     )
+
+def build_count_alias(
+    prompt: str,
+) -> str:
+    normalized = normalize_text(
+        prompt
+    )
+
+    if (
+        "inactive account"
+        in normalized
+        or "inactive accounts"
+        in normalized
+    ):
+        return "Inactive Account Count"
+
+    if (
+        "active account"
+        in normalized
+        or "active accounts"
+        in normalized
+    ):
+        return "Active Account Count"
+
+    if (
+        "customer"
+        in normalized
+        or "customers"
+        in normalized
+    ):
+        return "Customer Count"
+
+    if (
+        "account"
+        in normalized
+        or "accounts"
+        in normalized
+    ):
+        return "Account Count"
+
+    return "Record Count"
 
 def apply_high_volume_summary_policy(
     prompt: str,
@@ -1433,10 +2480,206 @@ def apply_high_volume_summary_policy(
         function="count",
         table=None,
         resolved_column=None,
-        alias="record_count",
+        alias=build_count_alias(
+            prompt
+        ),
         confidence=99,
     )
+
+def resolve_semantic_dimensions(
+    database: Session,
+    prompt: str,
+    physical_tables: list[object],
+) -> list[PlannedGrouping]:
+
+    normalized_prompt = normalize_text(
+        prompt
+    )
+
+    dimensions = list(
+        database.scalars(
+            select(
+                BusinessDimension
+            )
+            .where(
+                BusinessDimension.is_active
+                .is_(True),
+                BusinessDimension.approval_status
+                == "approved",
+            )
+            .order_by(
+                BusinessDimension.confidence.desc(),
+                BusinessDimension.id.asc(),
+            )
+        )
+    )
+
+    matched_groupings: list[
+        PlannedGrouping
+    ] = []
+
+    seen_column_ids: set[int] = set()
+
+    for dimension in dimensions:
+
+        phrases = [
+            normalize_text(
+                dimension.name
+            ),
+        ]
+
+        phrases.extend(
+            parse_semantic_phrases(
+                dimension.trigger_phrases
+            )
+        )
+
+        phrases.extend(
+            parse_semantic_phrases(
+                dimension.synonyms
+            )
+        )
+
+        phrases = list(
+            dict.fromkeys(
+                phrase
+                for phrase in phrases
+                if phrase
+            )
+        )
+
+        matched_phrase = None
+
+        prompt_words = set(
+            normalized_prompt.split()
+        )
+
+        for phrase in phrases:
+
+            # --------------------------------------------------
+            # Exact whole-phrase match
+            #
+            # Examples:
+            # by branch
+            # per branch
+            # branch wise
+            # --------------------------------------------------
+
+            if phrase_in_prompt(
+                phrase,
+                normalized_prompt,
+            ):
+                matched_phrase = phrase
+                break
+
+            # --------------------------------------------------
+            # Flexible semantic dimension matching
+            #
+            # Allows natural variations while keeping the
+            # governed dimension definition as the source
+            # of truth.
+            # --------------------------------------------------
+
+            phrase_words = {
+                word
+                for word
+                in normalize_text(
+                    phrase
+                ).split()
+                if word
+                not in {
+                    "by",
+                    "per",
+                    "each",
+                    "the",
+                    "a",
+                    "an",
+                    "wise",
+                }
+            }
+
+            if (
+                phrase_words
+                and phrase_words.issubset(
+                    prompt_words
+                )
+            ):
+                matched_phrase = phrase
+                break
+
+        if matched_phrase is None:
+            continue
+
+        metadata_column_id = (
+            dimension.metadata_column_id
+        )
+
+        if (
+            metadata_column_id
+            in seen_column_ids
+        ):
+            continue
+
+        # Find the exact governed physical column
+        # represented by this dimension.
+        for resolved_table in physical_tables:
+
+            matched = False
+
+            for column in (
+                resolved_table.table.columns
+            ):
+                if (
+                    column.id
+                    != metadata_column_id
+                ):
+                    continue
+
+                if (
+                    not column.is_discovered
+                    or not column.is_enabled
+                    or not column.ai_access_allowed
+                ):
+                    continue
+
+                resolved_column = (
+                    ResolvedColumn(
+                        column=column,
+                        confidence=(
+                            dimension.confidence
+                        ),
+                        matched_terms=[
+                            matched_phrase
+                        ],
+                    )
+                )
+
+                matched_groupings.append(
+                    PlannedGrouping(
+                        table=resolved_table,
+                        resolved_column=(
+                            resolved_column
+                        ),
+                        confidence=(
+                            dimension.confidence
+                        ),
+                    )
+                )
+
+                seen_column_ids.add(
+                    metadata_column_id
+                )
+
+                matched = True
+                break
+
+            if matched:
+                break
+
+    return matched_groupings
+
 def build_group_by(
+    database: Session,
     prompt: str,
     physical_tables: list[object],
     aggregation: PlannedAggregation | None,
@@ -1444,6 +2687,53 @@ def build_group_by(
     normalized = normalize_text(
         prompt
     )
+
+    # --------------------------------------------------
+    # Aggregation is required for grouped summaries.
+    # --------------------------------------------------
+
+    if aggregation is None:
+        return []
+
+    # --------------------------------------------------
+    # 1. Governed semantic dimension catalog
+    #
+    # This must run BEFORE the old "by ..." parser.
+    #
+    # Supports natural language such as:
+    #
+    # by branch
+    # per branch
+    # branch wise
+    # each branch
+    #
+    # by district
+    # per district
+    # district wise
+    #
+    # If the catalog resolves a dimension, use it.
+    # --------------------------------------------------
+
+    semantic_groupings = (
+        resolve_semantic_dimensions(
+            database=database,
+            prompt=prompt,
+            physical_tables=(
+                physical_tables
+            ),
+        )
+    )
+
+    if semantic_groupings:
+        return semantic_groupings
+
+    # --------------------------------------------------
+    # 2. Existing grouping logic remains as fallback.
+    #
+    # This protects existing capabilities that are not
+    # yet registered in business_dimensions, such as
+    # customer, currency, vehicle, etc.
+    # --------------------------------------------------
 
     is_ranking = any(
         term in normalized
@@ -1459,11 +2749,13 @@ def build_group_by(
         ]
     )
 
-    if aggregation is None:
-        return []
-
     # --------------------------------------------------
     # Ranking
+    #
+    # Examples:
+    #
+    # Show top 10 branches by deposit balance
+    # Show bottom 5 customers by account balance
     # --------------------------------------------------
 
     if is_ranking:
@@ -1482,12 +2774,21 @@ def build_group_by(
             .strip()
         )
 
-        # Vehicle ranking
-        if (
-            "vehicle"
-            in normalize_text(
+        normalized_dimension = (
+            normalize_text(
                 dimension_phrase
             )
+        )
+
+        dimension_match = None
+
+        # --------------------------------------------------
+        # Vehicle ranking
+        # --------------------------------------------------
+
+        if (
+            "vehicle"
+            in normalized_dimension
         ):
             dimension_match = (
                 find_best_column(
@@ -1502,12 +2803,13 @@ def build_group_by(
                 )
             )
 
+        # --------------------------------------------------
         # Branch ranking
+        # --------------------------------------------------
+
         elif (
             "branch"
-            in normalize_text(
-                dimension_phrase
-            )
+            in normalized_dimension
         ):
             dimension_match = (
                 find_best_column(
@@ -1521,11 +2823,13 @@ def build_group_by(
                 )
             )
 
+        # --------------------------------------------------
+        # District ranking
+        # --------------------------------------------------
+
         elif (
             "district"
-            in normalize_text(
-                dimension_phrase
-            )
+            in normalized_dimension
         ):
             dimension_match = (
                 find_best_column(
@@ -1536,14 +2840,21 @@ def build_group_by(
                         "district name",
                         "district_name",
                     ],
+                    preferred_entity_terms=[
+                        "f eb district",
+                        "district",
+                        "districts",
+                    ],
                 )
             )
 
+        # --------------------------------------------------
+        # Customer ranking
+        # --------------------------------------------------
+
         elif (
             "customer"
-            in normalize_text(
-                dimension_phrase
-            )
+            in normalized_dimension
         ):
             dimension_match = (
                 find_best_column(
@@ -1558,15 +2869,15 @@ def build_group_by(
                 )
             )
 
+        # --------------------------------------------------
+        # Currency ranking
+        # --------------------------------------------------
+
         elif (
             "currency"
-            in normalize_text(
-                dimension_phrase
-            )
+            in normalized_dimension
             or "currencies"
-            in normalize_text(
-                dimension_phrase
-            )
+            in normalized_dimension
         ):
             dimension_match = (
                 find_best_column(
@@ -1578,6 +2889,10 @@ def build_group_by(
                     ],
                 )
             )
+
+        # --------------------------------------------------
+        # Generic ranking dimension
+        # --------------------------------------------------
 
         else:
             dimension_match = (
@@ -1610,9 +2925,10 @@ def build_group_by(
         ]
 
     # --------------------------------------------------
-    # Normal aggregation
+    # 3. Traditional "by ..." grouping fallback
     #
     # Example:
+    #
     # Show total deposit balance by branch
     # --------------------------------------------------
 
@@ -1638,8 +2954,10 @@ def build_group_by(
     if not phrase:
         return []
 
-    normalized_phrase = normalize_text(
-        phrase
+    normalized_phrase = (
+        normalize_text(
+            phrase
+        )
     )
 
     # --------------------------------------------------
@@ -1678,14 +2996,10 @@ def build_group_by(
                 )
             ]
 
-        # --------------------------------------------------
+    # --------------------------------------------------
     # District grouping
     #
-    # Business-facing district reports must display
-    # District Name instead of District Code / RECID.
-    #
-    # Example:
-    # "Show total deposit balance by district"
+    # Always use District Name, not RECID/code.
     # --------------------------------------------------
 
     if normalized_phrase in {
@@ -1725,14 +3039,10 @@ def build_group_by(
                 )
             ]
 
-        # --------------------------------------------------
+    # --------------------------------------------------
     # Customer grouping
     #
-    # Business-facing customer reports must display
-    # Customer Name instead of Customer Number / RECID.
-    #
-    # Example:
-    # "Show total deposit balance by customer"
+    # Always prefer Customer Name.
     # --------------------------------------------------
 
     if normalized_phrase in {
@@ -1769,7 +3079,42 @@ def build_group_by(
             ]
 
     # --------------------------------------------------
-    # Standard grouping
+    # Currency grouping
+    # --------------------------------------------------
+
+    if normalized_phrase in {
+        "currency",
+        "currencies",
+    }:
+        currency_match = (
+            find_best_column(
+                physical_tables=(
+                    physical_tables
+                ),
+                terms=[
+                    "currency",
+                ],
+            )
+        )
+
+        if currency_match is not None:
+            (
+                resolved_table,
+                resolved_column,
+            ) = currency_match
+
+            return [
+                PlannedGrouping(
+                    table=resolved_table,
+                    resolved_column=(
+                        resolved_column
+                    ),
+                    confidence=99,
+                )
+            ]
+
+    # --------------------------------------------------
+    # Generic grouping fallback
     # --------------------------------------------------
 
     column_match = (
@@ -2765,27 +4110,57 @@ def create_governed_query_plan(
     # --------------------------------------------------
 
     plan.aggregation = (
-        build_aggregation(
-            intent=(
-                reasoning_result[
-                    "intent"
-                ]
-            ),
-            aggregation_terms=(
-                extraction_result[
-                    "aggregation_terms"
-                ]
-            ),
+    build_aggregation(
+        database=database,
+        prompt=prompt,
+        intent=(
+            reasoning_result[
+                "intent"
+            ]
+        ),
+        aggregation_terms=(
+            extraction_result[
+                "aggregation_terms"
+            ]
+        ),
+        physical_tables=(
+            physical_tables
+        ),
+        prompt_terms=(
+            extraction_result[
+                "keywords"
+            ]
+        ),
+    )
+)
+
+        # --------------------------------------------------
+    # Multi-measure semantic resolution
+    #
+    # Example:
+    # "Show number and balance of active accounts
+    #  by district"
+    #
+    # -> Account Count
+    # -> Account Balance
+    # --------------------------------------------------
+
+    semantic_aggregations = (
+        resolve_semantic_measures(
+            database=database,
+            prompt=prompt,
             physical_tables=(
                 physical_tables
             ),
-            prompt_terms=(
-                extraction_result[
-                    "keywords"
-                ]
-            ),
         )
     )
+
+    if len(
+        semantic_aggregations
+    ) > 1:
+        plan.aggregations = (
+            semantic_aggregations
+        )
 
     plan.aggregation = (
         apply_high_volume_summary_policy(
@@ -2804,16 +4179,212 @@ def create_governed_query_plan(
     # --------------------------------------------------
 
     plan.group_by = (
-        build_group_by(
-            prompt=prompt,
-            physical_tables=(
-                physical_tables
-            ),
-            aggregation=(
-                plan.aggregation
-            ),
-        )
+    build_group_by(
+        database=database,
+        prompt=prompt,
+        physical_tables=(
+            physical_tables
+        ),
+        aggregation=(
+            plan.aggregation
+        ),
     )
+)
+
+        # --------------------------------------------------
+    # Rich Core Banking account reports
+    #
+    # Examples:
+    #
+    # "Show active account report by branch"
+    # "Show inactive account report by branch"
+    #
+    # Output:
+    # Branch Name
+    # District Name
+    # Account Count
+    # Account Balance
+    # --------------------------------------------------
+
+    normalized_report_prompt = normalize_text(
+        prompt
+    )
+
+    is_account_report = (
+        "account report"
+        in normalized_report_prompt
+    )
+
+    if is_account_report:
+        # --------------------------------------------------
+        # Find FBNK_ACCOUNT for measures
+        # --------------------------------------------------
+
+        account_table = None
+
+        for resolved_table in physical_tables:
+            if (
+                normalize_text(
+                    resolved_table.table.table_name
+                )
+                == "fbnk account"
+            ):
+                account_table = resolved_table
+                break
+
+        # --------------------------------------------------
+        # Find WORKINGBALANCE
+        # --------------------------------------------------
+
+        working_balance_match = (
+            find_best_column(
+                physical_tables=physical_tables,
+                terms=[
+                    "working balance",
+                    "workingbalance",
+                ],
+                require_numeric=True,
+                exclude_primary_key=True,
+            )
+        )
+
+        # --------------------------------------------------
+        # Determine account status labels
+        # --------------------------------------------------
+
+        if (
+            "inactive account"
+            in normalized_report_prompt
+            or "inactive accounts"
+            in normalized_report_prompt
+        ):
+            count_alias = (
+                "Inactive Account Count"
+            )
+
+            balance_alias = (
+                "Inactive Account Balance"
+            )
+
+        else:
+            count_alias = (
+                "Active Account Count"
+            )
+
+            balance_alias = (
+                "Active Account Balance"
+            )
+
+        # --------------------------------------------------
+        # Build report measures
+        # --------------------------------------------------
+
+        plan.aggregations = []
+
+        plan.aggregations.append(
+            PlannedAggregation(
+                function="count",
+                table=None,
+                resolved_column=None,
+                alias=count_alias,
+                confidence=99,
+            )
+        )
+
+        if working_balance_match is not None:
+            (
+                balance_table,
+                balance_column,
+            ) = working_balance_match
+
+            plan.aggregations.append(
+                PlannedAggregation(
+                    function="sum",
+                    table=balance_table,
+                    resolved_column=(
+                        balance_column
+                    ),
+                    alias=balance_alias,
+                    confidence=99,
+                )
+            )
+
+        # --------------------------------------------------
+        # Rich branch report dimensions
+        #
+        # Branch Name + District Name
+        # --------------------------------------------------
+
+        if (
+            "by branch"
+            in normalized_report_prompt
+            or "by branches"
+            in normalized_report_prompt
+        ):
+            report_groupings: list[
+                PlannedGrouping
+            ] = []
+
+            branch_match = (
+                find_best_column(
+                    physical_tables=(
+                        physical_tables
+                    ),
+                    terms=[
+                        "branch name",
+                        "companyname_1",
+                    ],
+                )
+            )
+
+            district_match = (
+                find_best_column(
+                    physical_tables=(
+                        physical_tables
+                    ),
+                    terms=[
+                        "district name",
+                        "district_name",
+                    ],
+                )
+            )
+
+            if branch_match is not None:
+                (
+                    branch_table,
+                    branch_column,
+                ) = branch_match
+
+                report_groupings.append(
+                    PlannedGrouping(
+                        table=branch_table,
+                        resolved_column=(
+                            branch_column
+                        ),
+                        confidence=99,
+                    )
+                )
+
+            if district_match is not None:
+                (
+                    district_table,
+                    district_column,
+                ) = district_match
+
+                report_groupings.append(
+                    PlannedGrouping(
+                        table=district_table,
+                        resolved_column=(
+                            district_column
+                        ),
+                        confidence=99,
+                    )
+                )
+
+            if report_groupings:
+                plan.group_by = (
+                    report_groupings
+                )
 
     # --------------------------------------------------
     # Ordering
