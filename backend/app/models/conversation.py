@@ -20,6 +20,13 @@ class Conversation(Base):
         nullable=False,
         default="New conversation",
     )
+    
+    reporting_context: Mapped[
+        dict | None
+    ] = mapped_column(
+        JSON,
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

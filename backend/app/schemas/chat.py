@@ -28,8 +28,10 @@ class ChatMessageResponse(BaseModel):
 class ConversationSummaryResponse(BaseModel):
     id: int
     title: str
+    reporting_context: dict | None = None
     created_at: datetime
     updated_at: datetime
+    
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,8 +39,10 @@ class ConversationSummaryResponse(BaseModel):
 class ConversationDetailResponse(BaseModel):
     id: int
     title: str
+    reporting_context: dict | None = None
     created_at: datetime
     updated_at: datetime
+    
     messages: list[ChatMessageResponse]
 
     model_config = ConfigDict(from_attributes=True)

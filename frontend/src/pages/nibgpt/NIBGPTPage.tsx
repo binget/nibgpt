@@ -53,6 +53,7 @@ import type {
 import type {
   OrchestratorReport,
   ReportingContext,
+  WebSource,
 } from "../../services/orchestrator";
 
 import ReactMarkdown from "react-markdown";
@@ -63,16 +64,26 @@ import ReportTable from "../../components/ReportTable";
 type MessageRoute =
   | "reporting"
   | "knowledge"
-  | "general";
+  | "general"
+  | "web"
+  | "competitor";
 
 
 type NIBGPTMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+
   route?: MessageRoute;
+
   report?: OrchestratorReport;
+
+  sources?: WebSource[];
+
+  retrievedAt?: string | null;
+
   createdAt: string;
+
   isStreaming?: boolean;
 };
 
@@ -264,18 +275,19 @@ export default function NIBGPTPage() {
 
 
   const resolveStoredRoute = (
-    sourceType: string | null
-  ): MessageRoute | undefined => {
-    if (
-      sourceType === "reporting" ||
-      sourceType === "knowledge" ||
-      sourceType === "general"
-    ) {
-      return sourceType;
-    }
+  sourceType: string | null
+): MessageRoute | undefined => {
+  if (
+    sourceType === "reporting" ||
+    sourceType === "knowledge" ||
+    sourceType === "general" ||
+    sourceType === "web"
+  ) {
+    return sourceType;
+  }
 
-    return undefined;
-  };
+  return undefined;
+};
 
 
   const openConversation =
@@ -325,7 +337,8 @@ export default function NIBGPTPage() {
          * older conversation.
          */
         setReportingContext(
-          null
+          conversation.reporting_context ??
+            null
         );
 
         shouldAutoScrollRef.current =
@@ -565,6 +578,79 @@ export default function NIBGPTPage() {
         );
       }
     };
+
+const updateAssistantMessage = (
+  messageId: string,
+  updates: Partial<NIBGPTMessage>
+) => {
+  setMessages((previous) =>
+    previous.map((message) =>
+      message.id === messageId
+        ? {
+            ...message,
+            ...updates,
+          }
+        : message
+    )
+  );
+};
+
+const typeAssistantMessage = async (
+  messageId: string,
+  fullText: string
+) => {
+  let position = 0;
+
+  while (position < fullText.length) {
+    const remaining =
+      fullText.length - position;
+
+    // Larger chunks for long responses.
+    let chunkSize = 2;
+
+    if (remaining > 1500) {
+      chunkSize = 6;
+    } else if (remaining > 700) {
+      chunkSize = 4;
+    } else if (remaining > 250) {
+      chunkSize = 3;
+    }
+
+    position = Math.min(
+      position + chunkSize,
+      fullText.length
+    );
+
+    updateAssistantMessage(
+      messageId,
+      {
+        content:
+          fullText.slice(
+            0,
+            position
+          ),
+        isStreaming: true,
+      }
+    );
+
+    await new Promise<void>(
+      (resolve) => {
+        window.setTimeout(
+          resolve,
+          12
+        );
+      }
+    );
+  }
+
+  updateAssistantMessage(
+    messageId,
+    {
+      content: fullText,
+      isStreaming: false,
+    }
+  );
+};
 
 
 const resetConversation = () => {
@@ -997,18 +1083,43 @@ const resetConversation = () => {
        *   switches to /stream so the answer
        *   appears progressively.
        */
-      const response =
-        await askNIBGPT({
-          prompt: cleanPrompt,
-          previous_prompt:
-            previousUserPrompt,
-          context:
-            reportingContext,
-          requested_limit: 100,
-          maximum_entities: 6,
-          maximum_path_depth: 4,
-          user_role: "analyst",
-        });
+
+  const updateAssistantMessage = (
+  messageId: string,
+  updates: Partial<NIBGPTMessage>
+) => {
+  setMessages(
+    (previous) =>
+      previous.map(
+        (message) =>
+          message.id ===
+          messageId
+            ? {
+                ...message,
+                ...updates,
+              }
+            : message
+      )
+  );
+};
+  const response =
+  await askNIBGPT({
+    prompt: cleanPrompt,
+
+    conversation_id:
+      conversationId,
+
+    previous_prompt:
+      previousUserPrompt,
+
+    context:
+      reportingContext,
+
+    requested_limit: 100,
+    maximum_entities: 6,
+    maximum_path_depth: 4,
+    user_role: "analyst",
+  });
 
       if (
           response.route ===
@@ -1032,6 +1143,53 @@ const resetConversation = () => {
           response.context
         );
       }
+
+      if (response.route === "web") {
+  const assistantContent =
+    response.answer ||
+    "I couldn't find enough verified public information.";
+
+  const assistantId =
+    createMessageId(
+      "assistant-web"
+    );
+
+  // Add empty assistant bubble first.
+  addAssistantMessage({
+    id: assistantId,
+    role: "assistant",
+    content: "",
+    route: "web",
+    sources:
+      response.sources ?? [],
+    retrievedAt:
+      response.retrieved_at ??
+      null,
+    createdAt:
+      new Date().toISOString(),
+    isStreaming: true,
+  });
+
+  // Start ChatGPT-style typing.
+  await typeAssistantMessage(
+    assistantId,
+    assistantContent
+  );
+
+  // Save the COMPLETE answer,
+  // not the intermediate typing states.
+  await saveConversationMessage(
+    conversationId,
+    "assistant",
+    assistantContent,
+    "web",
+    null
+  );
+
+  await refreshConversations();
+
+  return;
+}
 
       if (
         response.route ===
@@ -2073,6 +2231,107 @@ message.isStreaming ? (
     >
       {message.content}
     </ReactMarkdown>
+
+    {message.route === "web" &&
+  message.sources &&
+  message.sources.length > 0 && (
+    <Box
+      sx={{
+        mt: 2.5,
+        pt: 1.75,
+        borderTop:
+          "1px solid #eadfd6",
+      }}
+    >
+      <Typography
+        variant="caption"
+        sx={{
+          display: "block",
+          mb: 1,
+          color: "#8c6d5a",
+          fontWeight: 800,
+          textTransform: "uppercase",
+          letterSpacing: 0.5,
+        }}
+      >
+        Sources
+      </Typography>
+
+      {message.sources.map(
+        (source, index) => (
+          <Box
+            key={`${source.url}-${index}`}
+            component="a"
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            sx={{
+              display: "block",
+              textDecoration: "none",
+              border:
+                "1px solid #eadfd6",
+              borderRadius: 2,
+              px: 1.5,
+              py: 1.2,
+              mb: 1,
+              bgcolor: "#fbf8f5",
+              transition:
+                "all 0.15s ease",
+
+              "&:hover": {
+                bgcolor: "#f4ece5",
+                borderColor:
+                  "#d4b9a6",
+              },
+            }}
+          >
+            <Typography
+              variant="body2"
+              sx={{
+                color: "#4b3021",
+                fontWeight: 800,
+                lineHeight: 1.4,
+              }}
+            >
+              {source.title}
+            </Typography>
+
+            <Typography
+              variant="caption"
+              sx={{
+                display: "block",
+                mt: 0.35,
+                color: "#8c6d5a",
+              }}
+            >
+              {source.trust_level ===
+              "official"
+                ? "Official source"
+                : "Public source"}
+              {" · "}
+              Open source ↗
+            </Typography>
+          </Box>
+        )
+      )}
+
+      {message.retrievedAt && (
+        <Typography
+          variant="caption"
+          sx={{
+            display: "block",
+            mt: 1,
+            color: "#a18d80",
+          }}
+        >
+          Retrieved{" "}
+          {new Date(
+            message.retrievedAt
+          ).toLocaleString()}
+        </Typography>
+      )}
+    </Box>
+  )}
   </Box>
 ) : (
   message.content

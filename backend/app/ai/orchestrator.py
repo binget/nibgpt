@@ -38,6 +38,56 @@ KNOWLEDGE_TERMS = {
     "document",
 }
 
+WEB_TERMS = {
+    "website",
+    "web site",
+    "nib website",
+    "nib's website",
+    "nib international bank website",
+    "public website",
+    "official website",
+    "online",
+}
+
+NIB_PUBLIC_TERMS = {
+    "nib",
+    "nib international bank",
+    "internet banking",
+    "mobile banking",
+    "digital banking",
+    "nib card",
+    "atm",
+    "pos",
+    "interest free banking",
+    "interest-free banking",
+    "investor relations",
+}
+
+NIB_PUBLIC_PRODUCT_TERMS = {
+    "what loans does nib provide",
+    "what loan does nib provide",
+    "loan products does nib offer",
+    "loan products does nib provide",
+
+    "what deposit products does nib offer",
+    "what deposit products does nib provide",
+    "deposit products does nib offer",
+    "deposit products does nib provide",
+
+    "what services does nib provide",
+    "what products does nib offer",
+    "what products does nib provide",
+
+    "internet banking",
+    "mobile banking",
+    "digital banking",
+    "interest free banking",
+    "interest-free banking",
+    "trade finance",
+    "trade service",
+    "forex service",
+}
+
 FOLLOW_UP_TERMS = {
     "top",
     "bottom",
@@ -68,6 +118,70 @@ FOLLOW_UP_TERMS = {
     "etb",
     "birr",
 }
+
+def is_nib_public_product_question(
+    prompt: str,
+) -> bool:
+    normalized = (
+        " ".join(
+            prompt.lower().split()
+        )
+    )
+
+    product_terms = {
+        "loan",
+        "loans",
+        "deposit",
+        "deposits",
+        "internet banking",
+        "mobile banking",
+        "digital banking",
+        "interest free banking",
+        "interest-free banking",
+        "trade finance",
+        "trade service",
+        "forex",
+        "remittance",
+    }
+
+    public_action_terms = {
+        "provide",
+        "provides",
+        "offer",
+        "offers",
+        "available",
+        "service",
+        "services",
+        "product",
+        "products",
+        "tell me about",
+        "what is",
+        "what are",
+    }
+
+    has_product = any(
+        term in normalized
+        for term in product_terms
+    )
+
+    has_public_action = any(
+        term in normalized
+        for term in public_action_terms
+    )
+
+    mentions_nib = any(
+        term in normalized
+        for term in {
+            "nib",
+            "nib international bank",
+        }
+    )
+
+    return (
+        has_product
+        and has_public_action
+        and mentions_nib
+    )
 
 def extract_reporting_context(
     prompt: str,
@@ -629,15 +743,13 @@ def build_prompt_from_context(
 
     if sort_direction == "ascending":
         parts.append(
-            "sort the results by the selected "
-            "measure from lowest to highest"
+            "sort ascending by the selected measure"
         )
 
     elif sort_direction == "descending":
         parts.append(
-            "sort the results by the selected "
-            "measure from highest to lowest"
-        )
+            "sort descending by the selected measure"
+    )
 
     # ==================================================
     # Sorting
@@ -712,17 +824,92 @@ def classify_prompt(
     normalized = (
         prompt.strip().lower()
     )
+    
+    if is_nib_public_product_question(
+        prompt
+    ):
+        return OrchestratorDecision(
+            route="web",
+            confidence=95,
+            reason=(
+                "The prompt appears to request "
+                "public information about NIB "
+                "products or services."
+            ),
+        )
 
     knowledge_score = 0
     report_score = 0
+    web_score = 0
+
+    # --------------------------------------------------
+    # Score internal knowledge
+    # --------------------------------------------------
 
     for term in KNOWLEDGE_TERMS:
         if term in normalized:
             knowledge_score += 1
 
+    # --------------------------------------------------
+    # Score governed reporting
+    # --------------------------------------------------
+
     for term in REPORT_TERMS:
         if term in normalized:
             report_score += 1
+
+    # --------------------------------------------------
+    # Score public web intelligence
+    # --------------------------------------------------
+
+    for term in WEB_TERMS:
+        if term in normalized:
+            web_score += 2
+
+    for term in NIB_PUBLIC_TERMS:
+        if term in normalized:
+            web_score += 1
+
+    # --------------------------------------------------
+    # Explicit reporting requests have priority.
+    #
+    # Example:
+    # "Show deposit balance by district"
+    # must remain governed reporting.
+    # --------------------------------------------------
+
+    if report_score >= 2:
+        return OrchestratorDecision(
+            route="reporting",
+            confidence=90,
+            reason=(
+                "The prompt appears to request "
+                "governed business data."
+            ),
+        )
+
+    # --------------------------------------------------
+    # Public NIB website intelligence
+    # --------------------------------------------------
+
+    if (
+        web_score > 0
+        and web_score >= knowledge_score
+        and report_score == 0
+    ):
+        return OrchestratorDecision(
+            route="web",
+            confidence=90,
+            reason=(
+                "The prompt appears to request "
+                "public information about "
+                "NIB International Bank."
+            ),
+        )
+
+    # --------------------------------------------------
+    # Internal institutional knowledge
+    # --------------------------------------------------
 
     if knowledge_score > report_score:
         return OrchestratorDecision(
@@ -734,6 +921,10 @@ def classify_prompt(
             ),
         )
 
+    # --------------------------------------------------
+    # Reporting
+    # --------------------------------------------------
+
     if report_score > 0:
         return OrchestratorDecision(
             route="reporting",
@@ -744,11 +935,15 @@ def classify_prompt(
             ),
         )
 
+    # --------------------------------------------------
+    # General AI
+    # --------------------------------------------------
+
     return OrchestratorDecision(
         route="general",
         confidence=70,
         reason=(
-            "No strong reporting or knowledge "
-            "intent was detected."
+            "No strong reporting, knowledge, "
+            "or public web intent was detected."
         ),
     )

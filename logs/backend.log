@@ -4,3 +4,124 @@ INFO:     Started reloader process [386845] using StatReload
 INFO:     Started server process [386848]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
+INFO:     172.24.102.41:63104 - "OPTIONS /api/auth/login HTTP/1.1" 200 OK
+INFO:     172.24.102.41:63104 - "POST /api/auth/login HTTP/1.1" 200 OK
+INFO:     172.24.102.41:63104 - "OPTIONS /api/executive-dashboard HTTP/1.1" 200 OK
+INFO:     172.24.102.41:50565 - "OPTIONS /api/executive-dashboard HTTP/1.1" 200 OK
+INFO:     172.24.102.41:50565 - "GET /api/executive-dashboard HTTP/1.1" 200 OK
+INFO:     172.24.102.41:63104 - "GET /api/executive-dashboard HTTP/1.1" 200 OK
+INFO:     172.24.102.41:63104 - "OPTIONS /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:50565 - "OPTIONS /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:63104 - "GET /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:50565 - "GET /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:50565 - "OPTIONS /api/chat/conversations/18 HTTP/1.1" 200 OK
+INFO:     172.24.102.41:50565 - "GET /api/chat/conversations/18 HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "DELETE /api/chat/conversations/18 HTTP/1.1" 204 No Content
+INFO:     172.24.102.41:55832 - "OPTIONS /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "POST /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "OPTIONS /api/chat/conversations/19/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "POST /api/chat/conversations/19/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "OPTIONS /api/orchestrator/ask HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "POST /api/orchestrator/ask HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "OPTIONS /api/orchestrator/report-explanation/stream HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "POST /api/orchestrator/report-explanation/stream HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "POST /api/chat/conversations/19/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:55832 - "GET /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:62373 - "POST /api/chat/conversations/19/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:62373 - "POST /api/orchestrator/ask HTTP/1.1" 200 OK
+INFO:     172.24.102.41:62373 - "POST /api/orchestrator/report-explanation/stream HTTP/1.1" 200 OK
+INFO:     172.24.102.41:62373 - "POST /api/chat/conversations/19/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:62373 - "GET /api/chat/conversations HTTP/1.1" 200 OK
+WARNING:  StatReload detected changes in 'app/api/orchestrator.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [386848]
+INFO:     Started server process [389706]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  StatReload detected changes in 'app/api/orchestrator.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [389706]
+INFO:     Started server process [389766]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     172.24.102.41:64175 - "OPTIONS /api/chat/conversations/19 HTTP/1.1" 200 OK
+INFO:     172.24.102.41:64175 - "DELETE /api/chat/conversations/19 HTTP/1.1" 204 No Content
+INFO:     172.24.102.41:52076 - "POST /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:52076 - "OPTIONS /api/chat/conversations/20/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:52076 - "POST /api/chat/conversations/20/messages HTTP/1.1" 200 OK
+
+================================================================================
+REPORTING FOLLOW-UP DEBUG
+================================================================================
+ORIGINAL PROMPT: Show deposit balance by district
+PREVIOUS CONTEXT: None
+MERGED CONTEXT: {'measure': 'balance', 'dimension': 'district', 'status': None, 'ranking': None, 'limit': None, 'sort_direction': None, 'district': None, 'branch': None, 'currency': None, 'customer': None, 'category': None, 'date_from': None, 'date_to': None, 'period': None, 'filters': {}, 'previous_prompt': 'Show deposit balance by district'}
+EFFECTIVE PROMPT: Show deposit balance by district
+================================================================================
+
+================================================================================
+REPORT RESULT DEBUG
+================================================================================
+SUCCESS: True
+DECISION: approved
+ROW COUNT: 15
+ROWS RETURNED: 15
+COLUMNS: ['District Name', 'Deposit Balance']
+SQL: SELECT
+    T2.DISTRICT_NAME AS "District Name",
+    SUM(T1.WORKINGBALANCE) AS "Deposit Balance"
+FROM
+    ODS2.FBNK_ACCOUNT T1
+    INNER JOIN ODS2.F_COMPANY T3 ON T3.RECID = T1.COCODE
+    INNER JOIN ODS2.F_EB_DISTRICT T2 ON T2.RECID = T3.DISTRICT
+WHERE
+    (T1.CATEGORY BETWEEN :p1 AND :p2 OR T1.CATEGORY BETWEEN :p3 AND :p4)
+    AND (T1.CATEGORY <> '1011' OR T1.WORKINGBALANCE > 0)
+GROUP BY
+    T2.DISTRICT_NAME
+FETCH FIRST 1000 ROWS ONLY
+PARAMETERS: {'p1': 1001, 'p2': 1099, 'p3': 6501, 'p4': 6600}
+ERRORS: []
+WARNINGS: ['No approved business domain matched the question.']
+================================================================================
+INFO:     172.24.102.41:52076 - "POST /api/orchestrator/ask HTTP/1.1" 200 OK
+INFO:     172.24.102.41:52076 - "POST /api/orchestrator/report-explanation/stream HTTP/1.1" 200 OK
+INFO:     172.24.102.41:52076 - "POST /api/chat/conversations/20/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:52076 - "GET /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     172.24.102.41:56556 - "POST /api/chat/conversations/20/messages HTTP/1.1" 200 OK
+
+================================================================================
+REPORTING FOLLOW-UP DEBUG
+================================================================================
+ORIGINAL PROMPT: Top 5
+PREVIOUS CONTEXT: None
+MERGED CONTEXT: {'measure': None, 'dimension': None, 'status': None, 'ranking': 'top', 'limit': 5, 'sort_direction': 'descending', 'district': None, 'branch': None, 'currency': None, 'customer': None, 'category': None, 'date_from': None, 'date_to': None, 'period': None, 'filters': {}, 'previous_prompt': 'Top 5'}
+EFFECTIVE PROMPT: Top 5
+================================================================================
+
+================================================================================
+REPORT RESULT DEBUG
+================================================================================
+SUCCESS: False
+DECISION: blocked
+ROW COUNT: 0
+ROWS RETURNED: 0
+COLUMNS: []
+SQL: None
+PARAMETERS: {}
+ERRORS: ['No approved physical table mapping was resolved.', 'Only approved governed plans can be compiled.']
+WARNINGS: ['No approved business domain matched the question.', 'No approved business capability matched the question.', 'No approved business entity matched the question.', 'No usable physical table mappings were found for the matched entities.']
+================================================================================
+INFO:     172.24.102.41:56556 - "POST /api/orchestrator/ask HTTP/1.1" 200 OK
+INFO:     172.24.102.41:56556 - "POST /api/orchestrator/report-explanation/stream HTTP/1.1" 200 OK
+INFO:     172.24.102.41:56556 - "POST /api/chat/conversations/20/messages HTTP/1.1" 200 OK
+INFO:     172.24.102.41:56556 - "GET /api/chat/conversations HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [389766]
+INFO:     Stopping reloader process [386845]

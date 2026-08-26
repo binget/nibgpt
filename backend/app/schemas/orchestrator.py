@@ -35,13 +35,18 @@ class OrchestratorRequest(BaseModel):
         max_length=5000,
     )
 
+    conversation_id: int | None = None
+    
     previous_prompt: str | None = None
 
     context: ReportingContext | None = None
+    
+    
 
     requested_limit: int = 100
     maximum_entities: int = 6
     maximum_path_depth: int = 4
+    
     user_role: str = "analyst"
 
 
@@ -53,9 +58,15 @@ class OrchestratorResponse(BaseModel):
     success: bool
 
     answer: str | None = None
-
     report: dict | None = None
-    
     context: ReportingContext | None = None
 
-    warnings: list[str] = []
+    warnings: list[str] = Field(
+        default_factory=list
+    )
+
+    sources: list[dict] = Field(
+        default_factory=list
+    )
+
+    retrieved_at: str | None = None

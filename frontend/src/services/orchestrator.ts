@@ -9,6 +9,7 @@ export interface OrchestratorRequest {
   user_role?: string;
   previous_prompt?: string | null;
   context?: ReportingContext | null;
+  conversation_id?: number | null;
 }
 
 
@@ -44,12 +45,19 @@ export interface OrchestratorReport {
   explanation: string[];
 }
 
+export interface WebSource {
+  title: string;
+  url: string;
+  trust_level?: string;
+}
 
 export interface OrchestratorResponse {
   route:
-    | "reporting"
-    | "knowledge"
-    | "general";
+  | "reporting"
+  | "knowledge"
+  | "general"
+  | "web"
+  | "competitor";
 
   confidence: number;
   reason: string;
@@ -92,6 +100,38 @@ export interface StreamCallbacks {
   onToken: (token: string) => void;
   onDone?: () => void;
   onError?: (message: string) => void;
+}
+
+export interface WebSource {
+  title: string;
+  url: string;
+  trust_level?: string;
+}
+
+export interface OrchestratorResponse {
+  route:
+  | "reporting"
+  | "knowledge"
+  | "general"
+  | "web"
+  | "competitor";
+
+  confidence: number;
+  reason: string;
+
+  success: boolean;
+
+  answer?: string | null;
+
+  report?: OrchestratorReport | null;
+
+  context?: ReportingContext | null;
+
+  warnings: string[];
+
+  sources?: WebSource[];
+
+  retrieved_at?: string | null;
 }
 
 

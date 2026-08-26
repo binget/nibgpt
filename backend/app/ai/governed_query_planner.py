@@ -3235,13 +3235,27 @@ def build_ordering(
 
     direction = "desc"
 
+    normalized_for_sort = normalize_text(
+        prompt
+    )
+
     if (
-        "bottom" in words
-        or "lowest" in words
-        or "smallest" in words
-        or "least" in words
-        or "ascending" in words
-        or "asc" in words
+        "highest to lowest"
+        in normalized_for_sort
+        or "largest to smallest"
+        in normalized_for_sort
+        or "descending"
+        in normalized_for_sort
+    ):
+        direction = "desc"
+
+    elif (
+        "lowest to highest"
+        in normalized_for_sort
+        or "smallest to largest"
+        in normalized_for_sort
+        or "ascending"
+        in normalized_for_sort
     ):
         direction = "asc"
 
@@ -3250,10 +3264,16 @@ def build_ordering(
         or "highest" in words
         or "largest" in words
         or "most" in words
-        or "descending" in words
-        or "desc" in words
     ):
         direction = "desc"
+
+    elif (
+        "bottom" in words
+        or "lowest" in words
+        or "smallest" in words
+        or "least" in words
+    ):
+        direction = "asc"
 
     # --------------------------------------------------
     # Aggregated / ranked query
@@ -3364,34 +3384,51 @@ def build_ordering(
         prompt
     )
 
-    # --------------------------------------------------
-    # Determine requested/default direction
-    #
-    # Aggregated business results default to DESC
-    # so the largest values appear first.
-    # --------------------------------------------------
-
     direction = "desc"
 
+    # --------------------------------------------------
+    # Explicit sort phrases must be checked first.
+    #
+    # "highest to lowest" contains the word "lowest",
+    # so checking "lowest" first would incorrectly
+    # produce ASC.
+    # --------------------------------------------------
+
     if (
-        "bottom " in normalized
-        or "lowest" in normalized
-        or "smallest" in normalized
-        or "least " in normalized
+        "highest to lowest" in normalized
+        or "largest to smallest" in normalized
+        or "descending" in normalized
+        or "desc " in normalized
+    ):
+        direction = "desc"
+
+    elif (
+        "lowest to highest" in normalized
+        or "smallest to largest" in normalized
         or "ascending" in normalized
         or "asc " in normalized
     ):
         direction = "asc"
+
+    # --------------------------------------------------
+    # Ranking words
+    # --------------------------------------------------
 
     elif (
         "top " in normalized
         or "highest" in normalized
         or "largest" in normalized
         or "most " in normalized
-        or "descending" in normalized
-        or "desc " in normalized
     ):
         direction = "desc"
+
+    elif (
+        "bottom " in normalized
+        or "lowest" in normalized
+        or "smallest" in normalized
+        or "least " in normalized
+    ):
+        direction = "asc"
 
     # --------------------------------------------------
     # Business-facing alphabetical ordering
@@ -3426,35 +3463,40 @@ def build_ordering(
     
 
     # --------------------------------------------------
-    # Aggregation / ranking
+    # Aggregated business reports
+    #
+    # Any grouped numeric aggregation should normally
+    # be ordered by the aggregated measure.
     #
     # Examples:
     #
-    # total deposit balance by currency
-    # -> ORDER BY SUM(...) DESC
+    # deposit balance by district
+    # -> SUM(balance) DESC
     #
-    # lowest deposit balance by currency
-    # -> ORDER BY SUM(...) ASC
+    # deposit balance by branch
+    # -> SUM(balance) DESC
+    #
+    # bottom 5 districts
+    # -> SUM(balance) ASC
     # --------------------------------------------------
 
     if (
-        aggregation
+        aggregation is not None
         and aggregation.resolved_column
-        and intent
-        in {
-            "aggregation",
-            "ranking",
-        }
+        is not None
+        and intent != "trend"
     ):
         return [
             PlannedSort(
-                table=aggregation.table,
+                table=(
+                    aggregation.table
+                ),
                 resolved_column=(
                     aggregation
                     .resolved_column
                 ),
                 direction=direction,
-                confidence=92,
+                confidence=95,
             )
         ]
 

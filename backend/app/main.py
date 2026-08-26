@@ -83,6 +83,10 @@ from app.api.stream import (
     router as stream_router,
 )
 
+from app.api.web_intelligence import (
+    router as web_intelligence_router,
+)
+
 app = FastAPI(
     title="NibGPT API",
     description="Nib International Bank Enterprise AI Platform",
@@ -126,6 +130,7 @@ app.include_router(business_measures_router)
 app.include_router(business_dimensions_router)
 app.include_router(orchestrator_router)
 app.include_router(stream_router)
+app.include_router(web_intelligence_router)
 
 @app.get("/")
 def home():

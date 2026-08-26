@@ -38,7 +38,7 @@ class OllamaProvider(AIProvider):
             "options": {
                 "num_ctx": 2048,
                 "temperature": 0.4,
-                "num_predict": 1024,
+                "num_predict": 2048,
             },
 
             "keep_alive": "30m",
@@ -61,7 +61,7 @@ class OllamaProvider(AIProvider):
         try:
             with urllib.request.urlopen(
                 request,
-                timeout=120,
+                timeout=240,
             ) as response:
                 raw_response = (
                     response
@@ -129,7 +129,7 @@ class OllamaProvider(AIProvider):
             "options": {
                 "num_ctx": 2048,
                 "temperature": 0.4,
-                "num_predict": 1024,
+                "num_predict": 2048,
             },
 
             "keep_alive": "30m",

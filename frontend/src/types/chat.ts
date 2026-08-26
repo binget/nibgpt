@@ -1,3 +1,6 @@
+import type {
+  ReportingContext,
+} from "../services/orchestrator";
 
 export interface ChatMessage {
   id: number;
@@ -15,6 +18,10 @@ export interface ChatMessage {
 export interface ConversationSummary {
   id: number;
   title: string;
+
+  reporting_context?:
+    ReportingContext | null;
+
   created_at: string;
   updated_at: string;
 }
@@ -22,8 +29,13 @@ export interface ConversationSummary {
 export interface ConversationDetail {
   id: number;
   title: string;
+
+  reporting_context?:
+    ReportingContext | null;
+
   created_at: string;
   updated_at: string;
+
   messages: ChatMessage[];
 }
 
