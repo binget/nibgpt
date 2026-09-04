@@ -18,6 +18,10 @@ from app.ai.web_sources import (
     NIB_PUBLIC_SOURCE,
 )
 
+from app.data.nib_departments import (
+    get_department_profile,
+)
+
 
 NIB_WEBSITE_PATHS = [
     "/",
@@ -210,11 +214,56 @@ def detect_product_request(
 def detect_management_request(
     question: str,
 ) -> str | None:
+
     normalized = normalize_phrase(
         question
     )
 
-    # Most-specific phrases first.
+    # ======================================================
+    # BOARD OF DIRECTORS
+    # ======================================================
+
+    if any(
+        term in normalized
+        for term in (
+            "board of directors",
+            "board directors",
+            "board members",
+            "members of the board",
+            "board member",
+        )
+    ):
+        return "board_of_directors"
+    
+    if any(
+        term in normalized
+        for term in (
+            "board of directors",
+            "board directors",
+            "board members",
+            "members of the board",
+            "board member",
+        )
+    ):
+        return "board_of_directors"
+    
+    if any(
+        term in normalized
+        for term in (
+            "directors of nib",
+            "directors of nib international bank",
+            "nib directors",
+            "nib international bank directors",
+            "directors of the bank",
+            "bank directors",
+        )
+    ):
+        return "board_of_directors"
+
+    # ======================================================
+    # DEPUTY CHIEF EXECUTIVES
+    # ======================================================
+
     if any(
         term in normalized
         for term in (
@@ -230,6 +279,10 @@ def detect_management_request(
     ):
         return "deputy_chief"
 
+    # ======================================================
+    # CHIEF EXECUTIVE
+    # ======================================================
+
     if any(
         term in normalized
         for term in (
@@ -240,6 +293,10 @@ def detect_management_request(
     ):
         return "chief"
 
+    # ======================================================
+    # DISTRICT DIRECTORS
+    # ======================================================
+
     if any(
         term in normalized
         for term in (
@@ -249,6 +306,10 @@ def detect_management_request(
     ):
         return "district_directors"
 
+    # ======================================================
+    # DEPARTMENT DIRECTORS
+    # ======================================================
+
     if any(
         term in normalized
         for term in (
@@ -257,6 +318,10 @@ def detect_management_request(
         )
     ):
         return "department_directors"
+
+    # ======================================================
+    # SENIOR MANAGEMENT
+    # ======================================================
 
     if any(
         term in normalized
@@ -268,20 +333,206 @@ def detect_management_request(
     ):
         return "senior_management"
 
+    # ======================================================
+    # EXECUTIVE MANAGEMENT
+    # ======================================================
+
     if "executive management" in normalized:
         return "executive_management"
+
+    # ======================================================
+    # GENERIC "DIRECTORS OF NIB"
+    #
+    # In normal banking terminology a question such as
+    # "Who are the directors of NIB?" most naturally refers
+    # to the Board of Directors, not every employee whose
+    # job title contains "Director".
+    # ======================================================
 
     if any(
         term in normalized
         for term in (
-            "director",
-            "directors",
+            "directors of nib",
+            "directors of nib international bank",
+            "nib directors",
+            "nib international bank directors",
+            "directors of the bank",
+            "bank directors",
         )
     ):
-        return "all_directors"
+        return "board_of_directors"
+
+    # ======================================================
+    # Do NOT interpret every generic use of "director" as
+    # District + Department Directors.
+    # ======================================================
 
     return None
 
+
+def detect_individual_management_question(
+    question: str,
+) -> bool:
+    """
+    Detect questions asking about a specific NIB person.
+
+    This does NOT decide who the person is.
+    It only identifies person-style questions so that
+    verified management data can be searched before
+    allowing the question to reach the LLM.
+    """
+
+    normalized = normalize_phrase(
+        question
+    )
+
+    if not normalized:
+        return False
+
+    prefixes = (
+        "who is ",
+        "who's ",
+        "who was ",
+        "tell me about ",
+        "what is the position of ",
+        "what is the role of ",
+        "what position does ",
+        "what role does ",
+    )
+
+    return any(
+        normalized.startswith(prefix)
+        for prefix in prefixes
+    )
+    
+def find_management_person(
+    question: str,
+    text: str,
+) -> dict | None:
+    """
+    Find a person inside verified NIB management text.
+
+    Expected director card structure:
+
+        Person Name
+        Department / Function
+        Director
+
+    Matching is tolerant of small spelling differences,
+    for example:
+
+        Bogale Teferedegn
+        Bogale Teferedegne
+
+    The returned information comes only from the
+    retrieved NIB website content.
+    """
+
+    from difflib import SequenceMatcher
+
+    question_normalized = (
+        normalize_phrase(
+            question
+        )
+    )
+
+    lines = [
+        " ".join(
+            line.split()
+        )
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return None
+
+    best_match = None
+    best_score = 0.0
+
+    index = 0
+
+    while index + 2 < len(lines):
+
+        name = lines[index]
+        position = lines[index + 1]
+        title = lines[index + 2]
+
+        # Only treat verified director cards
+        # as person records here.
+        if "director" not in title.lower():
+            index += 1
+            continue
+
+        normalized_name = (
+            normalize_phrase(
+                name
+            )
+        )
+
+        if not normalized_name:
+            index += 3
+            continue
+
+        # Exact name contained in question.
+        if normalized_name in question_normalized:
+
+            score = 1.0
+
+        else:
+
+            # Remove common question wording so that
+            # fuzzy matching compares mainly the name.
+            query_name = question_normalized
+
+            prefixes = (
+                "who is ",
+                "who was ",
+                "tell me about ",
+                "what is the position of ",
+                "what is the role of ",
+            )
+
+            for prefix in prefixes:
+
+                if query_name.startswith(prefix):
+
+                    query_name = (
+                        query_name[
+                            len(prefix):
+                        ]
+                    ).strip()
+
+                    break
+
+            score = SequenceMatcher(
+                None,
+                query_name,
+                normalized_name,
+            ).ratio()
+
+        if score > best_score:
+
+            best_score = score
+
+            best_match = {
+                "name": name,
+                "position": position,
+                "title": title,
+                "score": score,
+            }
+
+        index += 3
+
+    # High enough to tolerate a small typo,
+    # but not loose enough to guess another person.
+    if (
+        best_match
+        and best_score >= 0.88
+    ):
+        return best_match
+
+    return None
 
 def _heading_key(
     line: str,
@@ -536,6 +787,123 @@ def extract_role_records(
         records
     )
 
+def extract_board_of_directors(
+    text: str,
+) -> str:
+
+    if not text:
+        return ""
+
+    lines = [
+        " ".join(
+            line.split()
+        )
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    # Find the actual Board listing.
+    #
+    # The page contains "Board of Directors" several times
+    # in menus/navigation. The real listing begins immediately
+    # before the first qualification record.
+
+    start_index = None
+
+    for index, line in enumerate(lines):
+
+        if (
+            line.lower().startswith(
+                "qualification:"
+            )
+            and index > 0
+        ):
+            start_index = index - 1
+            break
+
+    if start_index is None:
+        return ""
+
+    records = []
+    index = start_index
+
+    valid_roles = {
+        "chairman",
+        "d/chairman",
+        "deputy chairman",
+        "vice chairman",
+        "director",
+    }
+
+    while index < len(lines):
+
+        name = lines[index]
+
+        # Company Secretary marks the end
+        # of the Board-member listing.
+        if (
+            "company secretary"
+            in name.lower()
+        ):
+            break
+
+        if index + 3 >= len(lines):
+            break
+
+        qualification = lines[
+            index + 1
+        ]
+
+        experience = lines[
+            index + 2
+        ]
+
+        role = lines[
+            index + 3
+        ]
+
+        if (
+            qualification.lower().startswith(
+                "qualification:"
+            )
+            and experience.lower().startswith(
+                "experience:"
+            )
+            and role.lower()
+            in valid_roles
+        ):
+
+            records.append(
+                {
+                    "name": name,
+                    "role": role,
+                    "qualification":
+                        qualification,
+                    "experience":
+                        experience,
+                }
+            )
+
+            index += 4
+            continue
+
+        index += 1
+
+    if not records:
+        return ""
+
+    formatted = []
+
+    for record in records:
+
+        formatted.append(
+            f"- **{record['name']}** — "
+            f"{record['role']}"
+        )
+
+    return "\n".join(
+        formatted
+    )
 
 def extract_management_evidence(
     question: str,
@@ -549,6 +917,24 @@ def extract_management_evidence(
 
     if not requested:
         return ""
+    
+        # ----------------------------------------------
+    # Board of Directors
+    #
+    # Board members are on their own official page,
+    # not inside Executive Management sections.
+    # ----------------------------------------------
+
+    if requested == "board_of_directors":
+
+        text = (
+            page.get("text")
+            or ""
+        ).strip()
+
+        return extract_board_of_directors(
+            text
+        )
 
     sections = (
         page.get("sections")
@@ -800,6 +1186,12 @@ def select_relevant_content(
             question
         )
     )
+    
+    individual_management_question = (
+        detect_individual_management_question(
+            question
+        )
+    )
 
     scored = []
 
@@ -864,9 +1256,13 @@ def select_relevant_content(
             * 4
         )
 
-        # Every management-group question belongs to the
-        # Executive Management page shown on the NIB site.
-        if management_request:
+        # Management groups and individual management
+        # person questions belong to the Executive
+        # Management page on the NIB website.
+        if (
+            management_request
+            or individual_management_question
+        ):
             if (
                 "executive-management"
                 in url
@@ -1056,6 +1452,17 @@ def get_nib_public_pages(
         )
     )
 
+    if (
+        management_request
+        == "board_of_directors"
+    ):
+        return fetch_source_pages(
+            source=NIB_PUBLIC_SOURCE,
+            paths=[
+                "/board-of-directors/",
+            ],
+        )
+
     if management_request:
         return fetch_source_pages(
             source=NIB_PUBLIC_SOURCE,
@@ -1077,6 +1484,8 @@ def get_nib_public_pages(
 
         "mobile_banking": [
             "/mobile-banking/",
+            "/internet-banking/",
+            "/ways-of_banking/",
         ],
 
         "interest_free_banking": [
@@ -1182,8 +1591,8 @@ def build_management_answer(
             "Senior Management",
         "executive_management":
             "Executive Management",
-        "all_directors":
-            "Directors",
+        "board_of_directors":
+        "Board of Directors",
     }
 
     label = labels.get(
@@ -1301,6 +1710,157 @@ def answer_nib_website_question(
             question
         )
     )
+    
+    # ==================================================
+    # INDIVIDUAL MANAGEMENT PERSON
+    #
+    # Search verified NIB management content before
+    # allowing a person question to reach the LLM.
+    # ==================================================
+
+    individual_management_question = (
+        detect_individual_management_question(
+            question
+        )
+    )
+
+    if (
+        not management_request
+        and individual_management_question
+    ):
+
+        management_text = (
+            selected[0].get(
+                "text"
+            )
+            or ""
+        ).strip()
+
+        person = find_management_person(
+            question=question,
+            text=management_text,
+        )
+
+        if person:
+
+            name = person["name"]
+            position = person["position"]
+            title = person["title"]
+            
+            department_profile = (
+                get_department_profile(
+                    position
+                )
+            )
+
+            # The website cards normally contain:
+            #
+            # Name
+            # Department / Function
+            # Director
+            #
+            # Construct the answer directly from those
+            # verified fields. Do not ask the LLM to
+            # invent a biography or responsibilities.
+
+            if (
+                title.lower().strip()
+                == "director"
+            ):
+
+                answer = (
+                    f"**{name}** is the Director of "
+                    f"**{position}** at "
+                    f"NIB International Bank."
+                )
+
+                if department_profile:
+
+                    description = (
+                        department_profile.get(
+                            "description"
+                        )
+                        or ""
+                    ).strip()
+
+                    key_functions = (
+                        department_profile.get(
+                            "key_functions"
+                        )
+                        or []
+                    )
+
+                    if description:
+                        answer += (
+                            "\n\n"
+                            f"### About the Department\n\n"
+                            f"{description}"
+                        )
+
+                    if key_functions:
+                        functions_text = "\n".join(
+                            f"- {item}"
+                            for item in key_functions
+                        )
+
+                        answer += (
+                            "\n\n"
+                            "### Key Functions\n\n"
+                            f"{functions_text}"
+                        )
+
+            else:
+
+                answer = (
+                    f"**{name}** — "
+                    f"{position} — "
+                    f"{title}"
+                )
+
+            return {
+                "success": True,
+                "answer": answer,
+                "source_type":
+                    "nib_public_web",
+                "retrieved_at":
+                    retrieved_at,
+                "sources": [
+                    {
+                        "title":
+                            selected[0].get(
+                                "title"
+                            ),
+                        "url":
+                            selected[0].get(
+                                "url"
+                            ),
+                    }
+                ],
+                "warnings": [],
+            }
+
+        # IMPORTANT:
+        # Do not let the LLM guess who the person is.
+        return {
+            "success": False,
+            "answer": (
+                "I could not find a verified NIB "
+                "management record matching that "
+                "person's name."
+            ),
+            "source_type":
+                "nib_public_web",
+            "retrieved_at":
+                retrieved_at,
+            "sources": [],
+            "warnings": [
+                (
+                    "No sufficiently confident "
+                    "management-person match was found."
+                )
+            ],
+        }
+
 
     if management_request:
         management_text = (

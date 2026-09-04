@@ -1,3 +1,5 @@
+import time
+
 from app.ai.providers.factory import (
     get_ai_provider,
 )
@@ -202,6 +204,95 @@ def build_contextual_prompt(
         f"{prompt}"
     )
 
+def get_instant_general_answer(
+    prompt: str,
+) -> str | None:
+
+    normalized = (
+        " ".join(
+            (prompt or "")
+            .lower()
+            .strip()
+            .split()
+        )
+        .rstrip("?!.")
+    )
+
+    if normalized in {
+        "who are you",
+        "what are you",
+        "what is nibgpt",
+        "introduce yourself",
+        "tell me about yourself",
+
+        "what can you do",
+        "what are your capabilities",
+        "what can nibgpt do",
+        "what are nibgpt capabilities",
+
+        "how can you help nib",
+        "how can you help the bank",
+        "how can nibgpt help nib",
+        "how can nibgpt help the bank",
+        "how does nibgpt help the bank",
+
+        "how can nibgpt support nib",
+        "how can you support nib",
+        "how can nibgpt support employees",
+        "how can you support bank employees",
+
+        "why does nib need nibgpt",
+    }:
+        return (
+            "I am **NIBGPT**, the enterprise AI assistant for "
+            "**NIB International Bank**.\n\n"
+
+            "I help NIB employees and management access information, "
+            "generate governed reports, use institutional knowledge, "
+            "and work more efficiently with approved AI capabilities.\n\n"
+
+            "My current capabilities include:\n\n"
+
+            "- **Enterprise Reporting & Data Analysis** — I can understand "
+            "natural-language reporting requests, generate governed reports, "
+            "analyze banking data, and present results clearly.\n"
+
+            "- **Internal Knowledge** — I can answer questions from approved "
+            "NIB policies, procedures, guidelines, and other documents available "
+            "through the bank's knowledge sources.\n"
+
+            "- **NIB Information** — I can provide information about NIB's "
+            "management, products, services, digital banking channels, and other "
+            "information from the official NIB website.\n"
+
+            "- **Competitor Intelligence** — I can help compare NIB with approved "
+            "competitor banks using trusted public information.\n"
+
+            "- **Banking Knowledge** — I can explain banking concepts, terminology, "
+            "operations, technology, data, and related topics in a practical way.\n"
+
+            "- **General Assistance** — I can help with analysis, explanations, "
+            "business questions, writing, technology, and other professional tasks.\n\n"
+
+            "I use the appropriate approved source depending on your question "
+            "and keep reporting data, internal documents, public information, "
+            "and general AI assistance separated."
+        )
+
+    if normalized in {
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    }:
+        return (
+            "Hello! I am NIBGPT. "
+            "How can I help you?"
+        )
+
+    return None
 
 def answer_general_question(
     prompt: str,
@@ -209,9 +300,20 @@ def answer_general_question(
         dict[str, str]
     ] | None = None,
 ) -> str:
+
+    instant_answer = (
+        get_instant_general_answer(
+            prompt
+        )
+    )
+
+    if instant_answer is not None:
+        return instant_answer
     provider = (
         get_ai_provider()
     )
+    
+    
 
     contextual_prompt = (
         build_contextual_prompt(
@@ -236,6 +338,28 @@ def stream_general_answer(
         dict[str, str]
     ] | None = None,
 ):
+    
+    instant_answer = (
+        get_instant_general_answer(
+            prompt
+        )
+    )
+
+    if instant_answer is not None:
+
+        words = instant_answer.split(" ")
+
+        for index, word in enumerate(words):
+
+            if index == 0:
+                yield word
+            else:
+                yield " " + word
+
+            time.sleep(0.025)
+
+        return
+    
     provider = (
         get_ai_provider()
     )

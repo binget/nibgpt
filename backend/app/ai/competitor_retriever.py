@@ -231,8 +231,15 @@ def normalize_link(
 
 def discover_competitor_links(
     source: CompetitorSource,
+    start_url: str | None = None,
     maximum_links: int = 80,
 ) -> list[str]:
+
+    root_url = (
+        start_url
+        or source.base_url
+    )
+
     headers = {
         "User-Agent":
             USER_AGENT,
@@ -244,7 +251,7 @@ def discover_competitor_links(
         headers=headers,
     ) as client:
         response = client.get(
-            source.base_url
+            root_url
         )
 
         response.raise_for_status()
@@ -307,5 +314,7 @@ def discover_competitor_links(
             >= maximum_links
         ):
             break
+
+    
 
     return discovered

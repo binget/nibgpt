@@ -8,10 +8,12 @@ from collections.abc import Iterator
 class AIProvider(ABC):
     @abstractmethod
     def generate(
-        self,
-        prompt: str,
-        system_prompt: str | None = None,
-    ) -> str:
+    self,
+    prompt: str,
+    system_prompt: str | None = None,
+    num_predict: int | None = None,
+    num_ctx: int | None = None,
+) -> str:
         raise NotImplementedError
 
     @abstractmethod

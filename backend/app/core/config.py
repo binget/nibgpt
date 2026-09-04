@@ -18,6 +18,20 @@ class Settings(BaseSettings):
     data_source_encryption_key: str
     
     ai_provider: str = "none"
+    
+    # ==================================================
+    # DMS Document Intelligence
+    # ==================================================
+
+    dms_data_source_id: int | None = None
+
+    dms_data_source_code: str = "DMS"
+
+    dms_document_table: str = "file_main_doc"
+
+    dms_base_url: str | None = None
+
+    dms_upload_directory: str | None = None
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.1"

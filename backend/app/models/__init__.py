@@ -33,6 +33,14 @@ from app.models.business_dimension import (
     BusinessDimension,
 )
 
+from app.models.document_index import (
+    DocumentIndex,
+)
+
+from app.models.document_chunk import (
+    DocumentChunk,
+)
+
 
 
 __all__ = [
@@ -51,4 +59,6 @@ __all__ = [
     "BusinessRelationshipJoinMapping",
     "BusinessMeasure",
     "BusinessDimension",
+    "DocumentIndex",
+    "DocumentChunk",
 ]

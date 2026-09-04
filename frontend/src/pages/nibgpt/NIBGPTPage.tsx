@@ -5,6 +5,7 @@ import {
   MoreVert,
   SendOutlined,
   SmartToyOutlined,
+  StopOutlined,
 } from "@mui/icons-material";
 
 import {
@@ -201,9 +202,8 @@ export default function NIBGPTPage() {
     );
 
  
-
-
   
+
   const conversationScrollRef =
     useRef<HTMLDivElement | null>(
       null
@@ -211,6 +211,15 @@ export default function NIBGPTPage() {
 
   const shouldAutoScrollRef =
     useRef(true);
+
+  const abortControllerRef =
+  useRef<AbortController | null>(null);
+
+const typingIntervalRef =
+  useRef<number | null>(null);
+
+const stopRequestedRef =
+  useRef(false);
 
 
   const handleConversationScroll = () => {
@@ -273,6 +282,7 @@ export default function NIBGPTPage() {
     void refreshConversations();
   }, []);
 
+  
 
   const resolveStoredRoute = (
   sourceType: string | null
@@ -595,61 +605,125 @@ const updateAssistantMessage = (
   );
 };
 
-const typeAssistantMessage = async (
-  messageId: string,
-  fullText: string
-) => {
-  let position = 0;
+const stopAnswering = () => {
+  stopRequestedRef.current = true;
 
-  while (position < fullText.length) {
-    const remaining =
-      fullText.length - position;
+  // Stop an active HTTP/stream request
+  if (abortControllerRef.current) {
+  abortControllerRef.current.abort();
+}
 
-    // Larger chunks for long responses.
-    let chunkSize = 2;
-
-    if (remaining > 1500) {
-      chunkSize = 6;
-    } else if (remaining > 700) {
-      chunkSize = 4;
-    } else if (remaining > 250) {
-      chunkSize = 3;
-    }
-
-    position = Math.min(
-      position + chunkSize,
-      fullText.length
+  // Stop frontend character-by-character typing
+  if (typingIntervalRef.current !== null) {
+    window.clearInterval(
+      typingIntervalRef.current
     );
 
-    updateAssistantMessage(
-      messageId,
-      {
-        content:
-          fullText.slice(
-            0,
-            position
-          ),
-        isStreaming: true,
-      }
-    );
-
-    await new Promise<void>(
-      (resolve) => {
-        window.setTimeout(
-          resolve,
-          12
-        );
-      }
-    );
+    typingIntervalRef.current = null;
   }
 
-  updateAssistantMessage(
-    messageId,
-    {
-      content: fullText,
-      isStreaming: false,
-    }
+  // Mark any partial assistant answer as finished
+  setMessages((current) =>
+    current.map((message) =>
+      message.isStreaming
+        ? {
+            ...message,
+            isStreaming: false,
+          }
+        : message
+    )
   );
+
+  setLoading(false);
+};
+
+const typeAssistantMessage = async (
+  assistantId: string,
+  fullText: string
+): Promise<void> => {
+
+  stopRequestedRef.current = false;
+
+  return new Promise((resolve) => {
+
+    let index = 0;
+
+    typingIntervalRef.current =
+      window.setInterval(() => {
+
+        if (stopRequestedRef.current) {
+
+          if (
+            typingIntervalRef.current !== null
+          ) {
+            window.clearInterval(
+              typingIntervalRef.current
+            );
+
+            typingIntervalRef.current = null;
+          }
+
+          resolve();
+          return;
+        }
+
+        index++;
+
+        const currentText =
+          fullText.slice(0, index);
+
+        setMessages((prevMessages) =>
+          prevMessages.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  content: currentText,
+                }
+              : message
+          )
+        );
+
+        requestAnimationFrame(() => {
+          const container =
+            conversationScrollRef.current;
+
+          if (
+            container &&
+            shouldAutoScrollRef.current
+          ) {
+            container.scrollTop =
+              container.scrollHeight;
+          }
+        });
+
+        if (index >= fullText.length) {
+
+          if (
+            typingIntervalRef.current !== null
+          ) {
+            window.clearInterval(
+              typingIntervalRef.current
+            );
+
+            typingIntervalRef.current = null;
+          }
+
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId
+                ? {
+                    ...message,
+                    isStreaming: false,
+                  }
+                : message
+            )
+          );
+
+          resolve();
+        }
+
+      }, 10);
+  });
 };
 
 
@@ -679,111 +753,204 @@ const resetConversation = () => {
   };
 
 
-  const streamGeneralResponse =
-    async (
-      cleanPrompt: string,
-      conversationId: number
-    ) => {
-      const assistantId =
-        createMessageId(
-          "assistant"
-        );
+const streamGeneralResponse =
+  async (
+    cleanPrompt: string,
+    conversationId: number,
+    mode: "general" | "document" =
+      "general"
+  ) => {
 
-      let streamedContent = "";
+    const assistantId =
+      createMessageId(
+        "assistant"
+      );
 
-      addAssistantMessage({
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        route: "general",
-        createdAt:
-          new Date().toISOString(),
-        isStreaming: true,
-      });
+    let streamedContent = "";
 
-      try {
-        await streamNIBGPT(
-  cleanPrompt,
-  conversationId,
-  {
-    onToken: (token) => {
-              if (!token) {
-                return;
-              }
+    addAssistantMessage({
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      route:
+      mode === "document"
+        ? "knowledge"
+        : "general",
+      createdAt:
+        new Date().toISOString(),
+      isStreaming: true,
+    });
 
-              streamedContent +=
-                token;
+    stopRequestedRef.current = false;
 
-              setMessages(
-                (current) =>
-                  current.map(
-                    (message) =>
-                      message.id ===
-                      assistantId
-                        ? {
-                            ...message,
-                            content:
-                              message.content +
-                              token,
-                          }
-                        : message
-                  )
-              );
+    const controller =
+      new AbortController();
 
-              if (
-                shouldAutoScrollRef.current
-              ) {
-                requestAnimationFrame(() => {
+    abortControllerRef.current =
+      controller;
+
+    try {
+
+      await streamNIBGPT(
+        cleanPrompt,
+        conversationId,
+        {
+          onToken: (token) => {
+
+            if (
+              !token ||
+              stopRequestedRef.current
+            ) {
+              return;
+            }
+
+            streamedContent +=
+              token;
+
+            setMessages(
+              (current) =>
+                current.map(
+                  (message) =>
+                    message.id ===
+                    assistantId
+                      ? {
+                          ...message,
+                          content:
+                            message.content +
+                            token,
+                        }
+                      : message
+                )
+            );
+
+            if (
+              shouldAutoScrollRef.current
+            ) {
+              requestAnimationFrame(
+                () => {
                   scrollToConversationEnd(
                     "auto"
                   );
-                });
-              }
-            },
-
-            onDone: () => {
-              setMessages(
-                (current) =>
-                  current.map(
-                    (message) =>
-                      message.id ===
-                      assistantId
-                        ? {
-                            ...message,
-                            isStreaming:
-                              false,
-                          }
-                        : message
-                  )
+                }
               );
-            },
+            }
+          },
 
-            onError: (
-              message
-            ) => {
-              setMessages(
-                (current) =>
-                  current.map(
-                    (item) =>
-                      item.id ===
-                      assistantId
-                        ? {
-                            ...item,
-                            content:
-                              item.content ||
-                              message,
-                            isStreaming:
-                              false,
-                          }
-                        : item
-                  )
-              );
+          onDone: () => {
 
-              setError(message);
-            },
-          }
+            setMessages(
+              (current) =>
+                current.map(
+                  (message) =>
+                    message.id ===
+                    assistantId
+                      ? {
+                          ...message,
+                          isStreaming:
+                            false,
+                        }
+                      : message
+                )
+            );
+          },
+
+          onError: (message) => {
+
+            if (
+              stopRequestedRef.current
+            ) {
+              return;
+            }
+
+            setMessages(
+              (current) =>
+                current.map(
+                  (item) =>
+                    item.id ===
+                    assistantId
+                      ? {
+                          ...item,
+                          content:
+                            item.content ||
+                            message,
+                          isStreaming:
+                            false,
+                        }
+                      : item
+                )
+            );
+
+            setError(message);
+          },
+        },
+        controller.signal,
+        mode
+      );
+
+      /*
+       * Stream completed normally.
+       */
+      if (
+        abortControllerRef.current ===
+        controller
+      ) {
+        abortControllerRef.current =
+          null;
+      }
+
+      if (
+        streamedContent.trim()
+      ) {
+        await saveConversationMessage(
+          conversationId,
+          "assistant",
+          streamedContent,
+                mode === "document"
+        ? "knowledge"
+        : "general",
+          null
         );
 
+        await refreshConversations();
+      }
+
+    } catch (streamError) {
+
+      const wasAborted =
+        stopRequestedRef.current ||
+        (
+          streamError instanceof Error &&
+          (
+            streamError.name ===
+              "AbortError" ||
+            streamError.message
+              .toLowerCase()
+              .includes(
+                "aborted"
+              )
+          )
+        );
+
+      if (wasAborted) {
+
+        setMessages(
+          (current) =>
+            current.map(
+              (message) =>
+                message.id ===
+                assistantId
+                  ? {
+                      ...message,
+                      isStreaming:
+                        false,
+                    }
+                  : message
+            )
+        );
+
+        /*
+         * Preserve/save the partial answer.
+         */
         if (
           streamedContent.trim()
         ) {
@@ -797,47 +964,70 @@ const resetConversation = () => {
 
           await refreshConversations();
         }
-      } catch (streamError) {
-        const message =
-          streamError instanceof Error
-            ? streamError.message
-            : (
-                "Unable to stream " +
-                "the NIBGPT response."
-              );
 
-        setError(message);
+        if (
+          abortControllerRef.current ===
+          controller
+        ) {
+          abortControllerRef.current =
+            null;
+        }
 
-        setMessages(
-          (current) =>
-            current.map(
-              (item) =>
-                item.id ===
-                assistantId
-                  ? {
-                      ...item,
-                      content:
-                        item.content ||
-                        (
-                          "I couldn't " +
-                          "complete that " +
-                          "request. Please " +
-                          "try again."
-                        ),
-                      isStreaming:
-                        false,
-                    }
-                  : item
-            )
-        );
+        return;
       }
-    };
 
-  const streamReportingExplanation =
+      /*
+       * Real streaming error.
+       */
+      const message =
+        streamError instanceof Error
+          ? streamError.message
+          : (
+              "Unable to stream " +
+              "the NIBGPT response."
+            );
+
+      setError(message);
+
+      setMessages(
+        (current) =>
+          current.map(
+            (item) =>
+              item.id ===
+              assistantId
+                ? {
+                    ...item,
+                    content:
+                      item.content ||
+                      (
+                        "I couldn't " +
+                        "complete that " +
+                        "request. Please " +
+                        "try again."
+                      ),
+                    isStreaming:
+                      false,
+                  }
+                : item
+          )
+      );
+
+      if (
+        abortControllerRef.current ===
+        controller
+      ) {
+        abortControllerRef.current =
+          null;
+      }
+    }
+  };
+
+const streamReportingExplanation =
   async (
     conversationId: number,
     report: OrchestratorReport
   ) => {
+
     const assistantId =
       createMessageId(
         "assistant-report"
@@ -847,8 +1037,7 @@ const resetConversation = () => {
 
     /*
      * Display the report immediately.
-     *
-     * The explanation then streams above it.
+     * The explanation streams above it.
      */
     addAssistantMessage({
       id: assistantId,
@@ -861,12 +1050,25 @@ const resetConversation = () => {
       isStreaming: true,
     });
 
+    stopRequestedRef.current = false;
+
+    const controller =
+      new AbortController();
+
+    abortControllerRef.current =
+      controller;
+
     try {
+
       await streamReportExplanation(
         report,
         {
           onToken: (token) => {
-            if (!token) {
+
+            if (
+              !token ||
+              stopRequestedRef.current
+            ) {
               return;
             }
 
@@ -903,6 +1105,7 @@ const resetConversation = () => {
           },
 
           onDone: () => {
+
             setMessages(
               (current) =>
                 current.map(
@@ -920,6 +1123,13 @@ const resetConversation = () => {
           },
 
           onError: () => {
+
+            if (
+              stopRequestedRef.current
+            ) {
+              return;
+            }
+
             setMessages(
               (current) =>
                 current.map(
@@ -941,8 +1151,17 @@ const resetConversation = () => {
                 )
             );
           },
-        }
+        },
+        controller.signal
       );
+
+      if (
+        abortControllerRef.current ===
+        controller
+      ) {
+        abortControllerRef.current =
+          null;
+      }
 
       const finalContent =
         explanation.trim() ||
@@ -958,9 +1177,69 @@ const resetConversation = () => {
       );
 
       await refreshConversations();
-    } catch (
-      explanationError
-    ) {
+
+    } catch (explanationError) {
+
+      const wasAborted =
+        stopRequestedRef.current ||
+        (
+          explanationError instanceof Error &&
+          (
+            explanationError.name ===
+              "AbortError" ||
+            explanationError.message
+              .toLowerCase()
+              .includes(
+                "aborted"
+              )
+          )
+        );
+
+      if (wasAborted) {
+
+        setMessages(
+          (current) =>
+            current.map(
+              (message) =>
+                message.id ===
+                assistantId
+                  ? {
+                      ...message,
+                      isStreaming:
+                        false,
+                    }
+                  : message
+            )
+        );
+
+        /*
+         * Preserve the partial report explanation.
+         */
+        if (
+          explanation.trim()
+        ) {
+          await saveConversationMessage(
+            conversationId,
+            "assistant",
+            explanation,
+            "reporting",
+            report
+          );
+
+          await refreshConversations();
+        }
+
+        if (
+          abortControllerRef.current ===
+          controller
+        ) {
+          abortControllerRef.current =
+            null;
+        }
+
+        return;
+      }
+
       console.error(
         "Report explanation error:",
         explanationError
@@ -995,9 +1274,16 @@ const resetConversation = () => {
         "reporting",
         report
       );
+
+      if (
+        abortControllerRef.current ===
+        controller
+      ) {
+        abortControllerRef.current =
+          null;
+      }
     }
   };
-
 
   const handleSubmit = async (
     event: FormEvent<HTMLFormElement>
@@ -1210,39 +1496,64 @@ const resetConversation = () => {
       }
 
       const assistantContent =
-        response.answer ||
-        (
-          response.route ===
-          "reporting"
-            ? "NIBGPT completed your report."
-            : "NIBGPT completed your request."
-        );
+    response.answer ||
+    (
+      response.route ===
+      "reporting"
+        ? "NIBGPT completed your report."
+        : "NIBGPT completed your request."
+    );
 
-      addAssistantMessage({
-        id: createMessageId(
-          "assistant"
-        ),
-        role: "assistant",
-        content:
-          assistantContent,
-        route:
-          response.route,
-        report:
-          response.report ||
-          undefined,
-        createdAt:
-          new Date().toISOString(),
-      });
+  /*
+  * Knowledge responses are normally
+  * deterministic and arrive as a complete
+  * answer from the backend.
+  *
+  * Display them progressively so they have
+  * the same ChatGPT-style experience.
+  */
+  if (
+  response.route ===
+  "knowledge"
+) {
 
-      await saveConversationMessage(
-        conversationId,
-        "assistant",
-        assistantContent,
-        response.route,
-        response.report ?? null
-      );
+  await streamGeneralResponse(
+    cleanPrompt,
+    conversationId,
+    "document"
+  );
 
-      await refreshConversations();
+  return;
+}
+
+/*
+ * Other non-streaming routes.
+ */
+addAssistantMessage({
+  id: createMessageId(
+    "assistant"
+  ),
+  role: "assistant",
+  content:
+    assistantContent,
+  route:
+    response.route,
+  report:
+    response.report ||
+    undefined,
+  createdAt:
+    new Date().toISOString(),
+});
+
+await saveConversationMessage(
+  conversationId,
+  "assistant",
+  assistantContent,
+  response.route,
+  response.report ?? null
+);
+
+await refreshConversations();
     } catch (requestError) {
       const maybeAxiosError =
         requestError as {
@@ -2450,9 +2761,11 @@ message.isStreaming ? (
                   conversationEndRef
                 }
               />
+              
             </Box>
           )}
         </Box>
+        
 
         {/* BOTTOM COMPOSER */}
 
@@ -2550,48 +2863,46 @@ message.isStreaming ? (
               />
 
               <IconButton
-                type="submit"
-                disabled={
-                  !prompt.trim() ||
-                  loading
-                }
-                sx={{
-                  width: 42,
-                  height: 42,
-                  bgcolor:
-                    prompt.trim() &&
-                    !loading
-                      ? "#5b311b"
-                      : "#ddd2ca",
-                  color: "#fff",
-                  "&:hover": {
-                    bgcolor:
-                      "#472515",
-                  },
-                  "&.Mui-disabled":
-                    {
-                      color:
-                        "#ffffff",
-                    },
-                }}
-              >
-                {loading
-                  ? (
-                    <Typography
-                      component="span"
-                      sx={{
-                        fontSize:
-                          "0.8rem",
-                        color: "#fff",
-                      }}
-                    >
-                      •••
-                    </Typography>
-                  )
-                  : (
-                    <SendOutlined />
-                  )}
-              </IconButton>
+  type={loading ? "button" : "submit"}
+  onClick={
+    loading
+      ? stopAnswering
+      : undefined
+  }
+  disabled={
+    !loading &&
+    !prompt.trim()
+  }
+  sx={{
+    width: 42,
+    height: 42,
+
+    bgcolor: loading
+      ? "#b91c1c"
+      : prompt.trim()
+        ? "#5b311b"
+        : "#ddd2ca",
+
+    color: "#fff",
+
+    "&:hover": {
+      bgcolor: loading
+        ? "#991b1b"
+        : "#472515",
+    },
+
+    "&.Mui-disabled": {
+      color: "#ffffff",
+      bgcolor: "#ddd2ca",
+    },
+  }}
+>
+  {loading ? (
+    <StopOutlined />
+  ) : (
+    <SendOutlined />
+  )}
+</IconButton>
             </Paper>
 
             <Typography

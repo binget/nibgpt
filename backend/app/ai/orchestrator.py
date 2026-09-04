@@ -119,6 +119,88 @@ FOLLOW_UP_TERMS = {
     "birr",
 }
 
+def is_internal_knowledge_question(
+    prompt: str,
+) -> bool:
+
+    normalized = (
+        " ".join(
+            prompt.lower().split()
+        )
+    )
+
+    # -------------------------------------------------
+    # Explicit institutional knowledge terms
+    # -------------------------------------------------
+
+    if any(
+        term in normalized
+        for term in KNOWLEDGE_TERMS
+    ):
+        return True
+
+    # -------------------------------------------------
+    # Common internal-document question patterns
+    # -------------------------------------------------
+
+    knowledge_question_patterns = (
+        "what are the responsibilities",
+        "what is the responsibility",
+        "who is responsible",
+        "what are the requirements",
+        "what is the requirement",
+        "what are the procedures",
+        "what are the steps",
+        "what does it say",
+        "what does this say",
+        "summarize",
+        "give me a summary",
+        "what are the objectives",
+        "what is the objective",
+        "what is the purpose",
+        "what are the roles",
+        "what are the duties",
+        "what are the controls",
+        "what are the guidelines",
+        "what are the provisions",
+    )
+
+    has_knowledge_pattern = any(
+        pattern in normalized
+        for pattern in knowledge_question_patterns
+    )
+
+    if not has_knowledge_pattern:
+        return False
+
+    # -------------------------------------------------
+    # Do not steal obvious database/reporting requests
+    # -------------------------------------------------
+
+    reporting_indicators = (
+        "balance",
+        "branch",
+        "district",
+        "customer",
+        "account",
+        "accounts",
+        "deposit",
+        "amount",
+        "top ",
+        "bottom ",
+        "report by",
+    )
+
+    has_reporting_indicator = any(
+        term in normalized
+        for term in reporting_indicators
+    )
+
+    if has_reporting_indicator:
+        return False
+
+    return True
+
 def is_nib_public_product_question(
     prompt: str,
 ) -> bool:
@@ -224,6 +306,10 @@ def extract_reporting_context(
     # Measure
     # ==================================================
 
+        # ==================================================
+    # Measure
+    # ==================================================
+
     if (
         "balance" in normalized
         and (
@@ -245,6 +331,23 @@ def extract_reporting_context(
         "number" in normalized
         or "how many" in normalized
         or "count" in normalized
+    ):
+        context["measure"] = (
+            "count"
+        )
+
+    # "Active account report by branch"
+    # naturally means number of accounts.
+    elif (
+        (
+            "account" in normalized
+            or "accounts" in normalized
+        )
+        and (
+            "report" in normalized
+            or "active" in normalized
+            or "inactive" in normalized
+        )
     ):
         context["measure"] = (
             "count"
@@ -785,6 +888,40 @@ def is_follow_up_prompt(
     normalized = (
         prompt.strip().lower()
     )
+    
+    normalized = (
+        " ".join(
+            prompt.lower().split()
+        )
+    )
+
+    words = normalized.split()
+
+    # --------------------------------------------------
+    # A complete explicit report request is not a
+    # follow-up merely because it contains words like
+    # branch, district, active, etc.
+    # --------------------------------------------------
+
+    standalone_report_markers = (
+        "show ",
+        "generate ",
+        "give me ",
+        "display ",
+        "list ",
+    )
+
+    if (
+        "report" in normalized
+        and any(
+            normalized.startswith(
+                marker
+            )
+            for marker
+            in standalone_report_markers
+        )
+    ):
+        return False
 
     words = normalized.split()
 
@@ -818,12 +955,211 @@ def build_contextual_prompt(
     )
 
 
+def is_nib_management_question(
+    prompt: str,
+) -> bool:
+
+    normalized = (
+        " ".join(
+            prompt.lower().split()
+        )
+    )
+
+    management_terms = (
+        "department director",
+        "department directors",
+        "district director",
+        "district directors",
+        "chief executive",
+        "chief executive officer",
+        "deputy chief executive",
+        "deputy chief executives",
+        "executive management",
+        "senior management",
+        "management team",
+        "board of directors",
+        "board members",
+        "directors of nib",
+        "nib directors",
+    )
+
+    return any(
+        term in normalized
+        for term in management_terms
+    )
+    
+def is_possible_nib_person_question(
+    prompt: str,
+) -> bool:
+    """
+    Detect person-style questions that may refer to
+    NIB management.
+
+    This only decides whether verified NIB public
+    intelligence should get the first opportunity
+    to answer. It does not identify the person.
+    """
+
+    normalized = (
+        " ".join(
+            prompt.lower().split()
+        )
+    )
+
+    if not normalized:
+        return False
+
+    person_prefixes = (
+        "who is ",
+        "who was ",
+        "tell me about ",
+        "what is the role of ",
+        "what is the position of ",
+        "what position does ",
+        "what role does ",
+    )
+
+    if not any(
+        normalized.startswith(prefix)
+        for prefix in person_prefixes
+    ):
+        return False
+
+    # Avoid routing obviously non-person questions
+    # such as:
+    # "Who is responsible for loan approval?"
+    non_person_phrases = (
+        "who is responsible",
+        "who is allowed",
+        "who is authorized",
+        "who is authorised",
+        "who is required",
+        "who is eligible",
+    )
+
+    if any(
+        normalized.startswith(term)
+        for term in non_person_phrases
+    ):
+        return False
+
+    return True
+
+def is_nibgpt_capability_question(
+    prompt: str,
+) -> bool:
+
+    normalized = (
+        " ".join(
+            (prompt or "")
+            .lower()
+            .strip()
+            .split()
+        )
+        .rstrip("?!.")
+    )
+
+    exact_questions = {
+        "what can you do",
+        "what are your capabilities",
+        "what can nibgpt do",
+        "what are nibgpt capabilities",
+        "how can you help nib",
+        "how can you help the bank",
+        "how can nibgpt help nib",
+        "how can nibgpt help the bank",
+        "how does nibgpt help the bank",
+        "how can nibgpt support nib",
+        "how can you support nib",
+        "how can nibgpt support employees",
+        "how can you support bank employees",
+        "why does nib need nibgpt",
+    }
+
+    if normalized in exact_questions:
+        return True
+
+    capability_patterns = (
+        "nibgpt capabilities",
+        "nibgpt capability",
+        "benefits of nibgpt",
+        "benefit of nibgpt",
+        "nibgpt help the bank",
+        "nibgpt help nib",
+        "nibgpt support the bank",
+        "nibgpt support nib",
+    )
+
+    return any(
+        pattern in normalized
+        for pattern in capability_patterns
+    )
+
 def classify_prompt(
     prompt: str,
 ) -> OrchestratorDecision:
     normalized = (
         prompt.strip().lower()
     )
+    
+    # --------------------------------------------------
+    # NIBGPT IDENTITY / CAPABILITY
+    #
+    # These questions are about NIBGPT itself.
+    # They must not be interpreted as NIB website
+    # information requests.
+    # --------------------------------------------------
+
+    if is_nibgpt_capability_question(
+        prompt
+    ):
+        return OrchestratorDecision(
+            route="general",
+            confidence=100,
+            reason=(
+                "The prompt asks about NIBGPT's "
+                "capabilities or how NIBGPT can "
+                "support the bank."
+            ),
+        )
+    
+        # --------------------------------------------------
+    # NIB PUBLIC MANAGEMENT / LEADERSHIP
+    # --------------------------------------------------
+
+    if is_nib_management_question(
+        prompt
+    ):
+        return OrchestratorDecision(
+            route="web",
+            confidence=95,
+            reason=(
+                "The prompt appears to request "
+                "public NIB management or "
+                "leadership information."
+            ),
+        )
+        
+    # --------------------------------------------------
+    # POSSIBLE INDIVIDUAL NIB MANAGEMENT PERSON
+    #
+    # Let verified NIB public intelligence check the
+    # person before allowing the general LLM to answer.
+    # --------------------------------------------------
+
+    if is_possible_nib_person_question(
+        prompt
+    ):
+        return OrchestratorDecision(
+            route="web",
+            confidence=90,
+            reason=(
+                "The prompt asks about a specific "
+                "person and should first be checked "
+                "against verified NIB public "
+                "management information."
+            ),
+        )
     
     if is_nib_public_product_question(
         prompt
@@ -887,6 +1223,18 @@ def classify_prompt(
                 "governed business data."
             ),
         )
+        
+    if is_internal_knowledge_question(
+        prompt
+    ):
+        return OrchestratorDecision(
+            route="knowledge",
+            confidence=90,
+            reason=(
+                "The prompt appears to request "
+                "internal institutional knowledge."
+            ),
+        )
 
     # --------------------------------------------------
     # Public NIB website intelligence
@@ -947,3 +1295,51 @@ def classify_prompt(
             "or public web intent was detected."
         ),
     )
+    
+def get_instant_general_answer(
+    prompt: str,
+) -> str | None:
+
+    normalized = (
+        " ".join(
+            (prompt or "")
+            .lower()
+            .strip()
+            .split()
+        )
+    )
+
+    identity_questions = {
+        "who are you",
+        "who are you?",
+        "what are you",
+        "what are you?",
+        "what is nibgpt",
+        "what is nibgpt?",
+        "tell me about yourself",
+        "introduce yourself",
+    }
+
+    if normalized in identity_questions:
+        return (
+            "I am NIBGPT, NIB International Bank's AI assistant. "
+            "I can help with bank reporting, internal knowledge, "
+            "approved NIB public information, competitor intelligence, "
+            "and general questions."
+        )
+
+    greeting_questions = {
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    }
+
+    if normalized in greeting_questions:
+        return (
+            "Hello! I am NIBGPT. How can I help you?"
+        )
+
+    return None

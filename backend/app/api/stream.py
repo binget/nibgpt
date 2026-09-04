@@ -43,6 +43,10 @@ from app.ai.report_explainer import (
     stream_report_explanation,
 )
 
+from app.ai.document_intelligence import (
+    stream_document_question,
+)
+
 
 router = APIRouter(
     prefix="/api/orchestrator",
@@ -57,6 +61,8 @@ class StreamRequest(BaseModel):
     )
 
     conversation_id: int | None = None
+
+    mode: str = "general"
     
 class ReportExplanationRequest(
     BaseModel
@@ -208,14 +214,26 @@ def stream_nibgpt(
                 "start"
             )
 
-            for token in (
-                stream_general_answer(
-                    prompt=(
-                        payload.prompt
-                    ),
-                    history=history,
+            if payload.mode == "document":
+
+                token_stream = (
+                    stream_document_question(
+                        database=database,
+                        question=payload.prompt,
+                    )
                 )
-            ):
+
+            else:
+
+                token_stream = (
+                    stream_general_answer(
+                        prompt=payload.prompt,
+                        history=history,
+                    )
+                )
+
+            for token in token_stream:
+
                 yield event_message(
                     "token",
                     content=token,

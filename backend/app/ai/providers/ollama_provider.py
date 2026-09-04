@@ -12,10 +12,12 @@ from app.core.config import (
 
 class OllamaProvider(AIProvider):
     def generate(
-        self,
-        prompt: str,
-        system_prompt: str | None = None,
-    ) -> str:
+    self,
+    prompt: str,
+    system_prompt: str | None = None,
+    num_predict: int | None = None,
+    num_ctx: int | None = None,
+) -> str:
         url = (
             f"{settings.ollama_base_url}"
             "/api/generate"
@@ -36,10 +38,18 @@ class OllamaProvider(AIProvider):
             "stream": False,
 
             "options": {
-                "num_ctx": 2048,
-                "temperature": 0.4,
-                "num_predict": 2048,
-            },
+            "num_ctx": (
+                num_ctx
+                if num_ctx is not None
+                else 2048
+            ),
+            "temperature": 0.4,
+            "num_predict": (
+                num_predict
+                if num_predict is not None
+                else 2048
+            ),
+        },
 
             "keep_alive": "30m",
         }
@@ -103,9 +113,11 @@ class OllamaProvider(AIProvider):
         return answer
 
     def stream(
-        self,
-        prompt: str,
-        system_prompt: str | None = None,
+    self,
+    prompt: str,
+    system_prompt: str | None = None,
+    num_predict: int | None = None,
+    num_ctx: int | None = None,
     ):
         url = (
             f"{settings.ollama_base_url}"
@@ -127,10 +139,18 @@ class OllamaProvider(AIProvider):
             "stream": True,
             
             "options": {
-                "num_ctx": 2048,
-                "temperature": 0.4,
-                "num_predict": 2048,
-            },
+            "num_ctx": (
+                num_ctx
+                if num_ctx is not None
+                else 2048
+            ),
+            "temperature": 0.4,
+            "num_predict": (
+                num_predict
+                if num_predict is not None
+                else 2048
+            ),
+        },
 
             "keep_alive": "30m",
         }

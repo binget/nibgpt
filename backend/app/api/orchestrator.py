@@ -1,34 +1,35 @@
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import (
+    datetime,
+    timezone,
+)
 
 from fastapi import (
     APIRouter,
     Depends,
+    HTTPException,
 )
 
 from sqlalchemy import (
     select,
 )
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import (
+    Session,
+)
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 from app.database.session import (
     get_db,
 )
 
-from app.ai.orchestrator import (
-    build_prompt_from_context,
-    classify_prompt,
-    is_follow_up_prompt,
-    merge_reporting_context,
-)
-
-from app.ai.query_executor import (
-    execute_governed_prompt,
-)
-
-from app.ai.web_intelligence import (
-    answer_nib_website_question,
-)
+# ============================================================
+# REQUEST / RESPONSE SCHEMAS
+# ============================================================
 
 from app.schemas.orchestrator import (
     OrchestratorRequest,
@@ -36,14 +37,66 @@ from app.schemas.orchestrator import (
     ReportingContext,
 )
 
-from app.models.conversation import (
-    ChatMessage,
-    Conversation,
+# ============================================================
+# REAL NIBGPT ORCHESTRATION ENGINE
+# ============================================================
+
+from app.ai.orchestrator import (
+    classify_prompt,
+    extract_reporting_context,
+    merge_reporting_context,
+    build_prompt_from_context,
+    is_follow_up_prompt,
 )
+
+# ============================================================
+# REAL REPORTING ENGINE
+# ============================================================
+
+from app.ai.query_executor import (
+    execute_governed_prompt,
+)
+
+# ============================================================
+# REAL GENERAL AI
+# ============================================================
+
+from app.ai.general_agent import (
+    answer_general_question,
+)
+
+# ============================================================
+# DOCUMENT INTELLIGENCE
+# ============================================================
+
+from app.ai.document_intelligence import (
+    answer_document_question,
+)
+
+# ============================================================
+# NIB PUBLIC WEBSITE INTELLIGENCE
+# ============================================================
+
+from app.ai.web_intelligence import (
+    answer_nib_website_question,
+)
+
+# ============================================================
+# COMPETITOR INTELLIGENCE
+# ============================================================
 
 from app.ai.competitor_intelligence import (
     answer_competitor_question,
-    is_competitor_question,
+    detect_competitors,
+)
+
+# ============================================================
+# CONVERSATION MODELS
+# ============================================================
+
+from app.models.conversation import (
+    ChatMessage,
+    Conversation,
 )
 
 
@@ -54,70 +107,25 @@ router = APIRouter(
 
 
 # ============================================================
-# Public NIB web-intelligence routing
-#
-# These phrases should never be rewritten through old reporting
-# context. This specifically protects questions such as:
-#
-#   Who are the district directors?
-#   Who are the department directors?
-#   Who are the deputy chief executives?
-#
-# from being misrouted to governed reporting merely because
-# words such as "district" occur in the question.
+# CONVERSATION HISTORY
 # ============================================================
 
-NIB_PUBLIC_LEADERSHIP_TERMS = {
-    "ceo",
-    "chief executive",
-    "chief executive officer",
-    "chief executive officers",
-    "deputy chief",
-    "deputy chief executive",
-    "deputy chief executives",
-    "deputy chief executive officer",
-    "deputy chief executive officers",
-    "deputy ceo",
-    "deputy ceos",
-    "deputies",
-    "executive management",
-    "executive managers",
-    "senior management",
-    "senior manager",
-    "senior managers",
-    "district director",
-    "district directors",
-    "department director",
-    "department directors",
-}
-
-
-def looks_like_nib_public_leadership_question(
-    prompt: str,
-) -> bool:
-    normalized = (
-        " ".join(
-            prompt.lower().split()
-        )
-    )
-
-    return any(
-        term in normalized
-        for term in NIB_PUBLIC_LEADERSHIP_TERMS
-    )
-
-
-# ============================================================
-# Reporting-context recovery
-# ============================================================
-
-def rebuild_reporting_context(
+def load_conversation_history(
     database: Session,
     conversation_id: int | None,
     current_prompt: str,
-) -> dict | None:
+) -> list[dict[str, str]]:
+
     if conversation_id is None:
-        return None
+        return []
+
+    conversation = database.get(
+        Conversation,
+        conversation_id,
+    )
+
+    if conversation is None:
+        return []
 
     statement = (
         select(
@@ -127,12 +135,10 @@ def rebuild_reporting_context(
             ChatMessage.conversation_id
             == conversation_id
         )
-        .where(
-            ChatMessage.role == "user"
-        )
         .order_by(
-            ChatMessage.created_at.asc()
+            ChatMessage.created_at.desc()
         )
+        .limit(8)
     )
 
     messages = list(
@@ -141,144 +147,609 @@ def rebuild_reporting_context(
         ).all()
     )
 
-    if not messages:
-        return None
+    # Query is newest first.
+    messages.reverse()
 
-    prompts = [
-        message.content.strip()
-        for message in messages
-        if message.content
-        and message.content.strip()
-    ]
+    history: list[
+        dict[str, str]
+    ] = []
 
-    # The frontend stores the current user message before
-    # calling /ask. Do not treat it as previous context.
-    if (
-        prompts
-        and prompts[-1].lower()
-        == current_prompt.strip().lower()
-    ):
-        prompts.pop()
+    for message in messages:
 
-    if not prompts:
-        return None
-
-    context = None
-
-    for historical_prompt in prompts:
-        context = merge_reporting_context(
-            previous_context=context,
-            prompt=historical_prompt,
+        role = (
+            message.role
+            .strip()
+            .lower()
         )
 
-    return context
+        if role not in {
+            "user",
+            "assistant",
+        }:
+            continue
+
+        content = (
+            message.content
+            or ""
+        ).strip()
+
+        if not content:
+            continue
+
+        history.append(
+            {
+                "role": role,
+                "content": content,
+            }
+        )
+
+    # Frontend may already have saved the
+    # current user prompt before calling /ask.
+    #
+    # Remove duplicate current prompt.
+
+    if history:
+
+        last_message = history[-1]
+
+        if (
+            last_message["role"]
+            == "user"
+            and
+            last_message["content"].strip()
+            == current_prompt.strip()
+        ):
+            history.pop()
+
+    return history
 
 
-def get_saved_reporting_context(
-    database: Session,
-    conversation_id: int | None,
-) -> dict | None:
-    if conversation_id is None:
-        return None
+# ============================================================
+# REPORTING CONTEXT
+# ============================================================
 
-    conversation = database.get(
-        Conversation,
-        conversation_id,
+def prepare_reporting_prompt(
+    payload: OrchestratorRequest,
+) -> tuple[
+    str,
+    ReportingContext,
+]:
+
+    prompt = (
+        payload.prompt
+        or ""
+    ).strip()
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Only inherit old reporting context when the new prompt
+    # is actually a follow-up.
+    #
+    # This prevents:
+    #
+    #   Show top 10 customers by deposit balance
+    #
+    # followed by:
+    #
+    #   Show active account report by branch
+    #
+    # from accidentally inheriting "top 10 customers".
+    # --------------------------------------------------------
+
+    follow_up = is_follow_up_prompt(
+        prompt
     )
+
+    previous_context = None
 
     if (
-        conversation is None
-        or not conversation.reporting_context
+        follow_up
+        and payload.context is not None
     ):
-        return None
 
-    return dict(
-        conversation.reporting_context
-    )
+        if hasattr(
+            payload.context,
+            "model_dump",
+        ):
+            previous_context = (
+                payload.context.model_dump()
+            )
+        else:
+            previous_context = (
+                payload.context.dict()
+            )
 
+    # --------------------------------------------------------
+    # Follow-up
+    # --------------------------------------------------------
 
-# ============================================================
-# Web response helper
-# ============================================================
+    if (
+        follow_up
+        and previous_context
+    ):
 
-def build_web_response(
-    payload: OrchestratorRequest,
-    decision,
-) -> OrchestratorResponse:
-    try:
-        web_result = (
-            answer_nib_website_question(
-                payload.prompt
+        merged_context = (
+            merge_reporting_context(
+                previous_context=(
+                    previous_context
+                ),
+                prompt=prompt,
             )
         )
 
-        return OrchestratorResponse(
-            route="web",
-            confidence=(
-                decision.confidence
-            ),
-            reason=decision.reason,
-            success=web_result.get(
-                "success",
-                False,
-            ),
-            answer=web_result.get(
-                "answer"
-            ),
-            report=None,
-            context=None,
-            warnings=web_result.get(
-                "warnings",
-                [],
-            ),
-            sources=web_result.get(
-                "sources",
-                [],
-            ),
-            retrieved_at=web_result.get(
-                "retrieved_at"
-            ),
+        reporting_prompt = (
+            build_prompt_from_context(
+                merged_context
+            )
         )
 
-    except Exception as error:
-        return OrchestratorResponse(
-            route="web",
-            confidence=(
-                getattr(
-                    decision,
-                    "confidence",
-                    90,
-                )
-            ),
-            reason=(
-                getattr(
-                    decision,
-                    "reason",
-                    (
-                        "The prompt appears to request "
-                        "public information about "
-                        "NIB International Bank."
-                    ),
-                )
-            ),
-            success=False,
-            answer=(
-                "NIBGPT could not retrieve "
-                "the requested public NIB "
-                "website information."
-            ),
-            report=None,
-            context=None,
-            warnings=[
-                str(error)
-            ],
-            sources=[],
-            retrieved_at=None,
+        context = ReportingContext(
+            **merged_context
         )
+
+        return (
+            reporting_prompt,
+            context,
+        )
+
+    # --------------------------------------------------------
+    # Standalone reporting request
+    #
+    # DO NOT inherit previous reporting context.
+    # --------------------------------------------------------
+
+    current_context = (
+        extract_reporting_context(
+            prompt
+        )
+    )
+
+    context = ReportingContext(
+        **current_context
+    )
+
+    return (
+        prompt,
+        context,
+    )
 
 
 # ============================================================
-# Main orchestrator endpoint
+# NORMALIZE REPORTING RESULT
+# ============================================================
+
+def normalize_reporting_result(
+    result,
+    context: ReportingContext,
+) -> dict:
+
+    if not isinstance(
+        result,
+        dict,
+    ):
+        return {
+            "success": False,
+            "answer": (
+                "The reporting engine returned "
+                "an invalid response."
+            ),
+            "report": None,
+            "context": context,
+            "warnings": [],
+            "sources": [],
+        }
+
+    success = result.get(
+        "success",
+        False,
+    )
+
+    answer = result.get(
+        "answer"
+    )
+
+    report = result.get(
+        "report"
+    )
+
+    # Some versions of the query executor return
+    # the report fields directly instead of nesting
+    # them under "report".
+    #
+    # Preserve the complete result so the frontend
+    # does not lose SQL/report/table metadata.
+
+    if (
+        success
+        and report is None
+    ):
+        report = result
+
+    warnings = (
+        result.get(
+            "warnings"
+        )
+        or []
+    )
+
+    return {
+        "success": success,
+        "answer": answer,
+        "report": report,
+        "context": context,
+        "warnings": warnings,
+        "sources": (
+            result.get(
+                "sources"
+            )
+            or []
+        ),
+    }
+
+
+# ============================================================
+# REPORTING
+# ============================================================
+
+def handle_reporting(
+    database: Session,
+    payload: OrchestratorRequest,
+) -> dict:
+
+    (
+        reporting_prompt,
+        reporting_context,
+    ) = prepare_reporting_prompt(
+        payload
+    )
+
+    result = execute_governed_prompt(
+        database=database,
+        prompt=reporting_prompt,
+        domain_id=None,
+        requested_limit=(
+            payload.requested_limit
+        ),
+        maximum_entities=(
+            payload.maximum_entities
+        ),
+        maximum_path_depth=(
+            payload.maximum_path_depth
+        ),
+        user_role=(
+            payload.user_role
+        ),
+    )
+
+    return normalize_reporting_result(
+        result=result,
+        context=reporting_context,
+    )
+
+
+# ============================================================
+# DOCUMENT INTELLIGENCE
+# ============================================================
+
+def handle_knowledge(
+    database: Session,
+    prompt: str,
+) -> dict:
+
+    result = answer_document_question(
+        database=database,
+        question=prompt,
+    )
+
+    if not isinstance(
+        result,
+        dict,
+    ):
+        return {
+            "success": False,
+            "answer": (
+                "Document Intelligence returned "
+                "an invalid response."
+            ),
+            "report": None,
+            "context": None,
+            "warnings": [],
+            "sources": [],
+        }
+
+    # --------------------------------------------------------
+    # Support both the older:
+    #
+    # source + pages
+    #
+    # and newer:
+    #
+    # sources[]
+    #
+    # Document Intelligence result formats.
+    # --------------------------------------------------------
+
+    sources = (
+        result.get(
+            "sources"
+        )
+        or []
+    )
+
+    if (
+        not sources
+        and result.get(
+            "source"
+        )
+    ):
+
+        source = result.get(
+            "source"
+        )
+
+        if isinstance(
+            source,
+            dict,
+        ):
+            source_item = dict(
+                source
+            )
+
+        else:
+            source_item = {
+                "title": str(
+                    source
+                )
+            }
+
+        if result.get(
+            "pages"
+        ):
+            source_item[
+                "pages"
+            ] = result.get(
+                "pages"
+            )
+
+        sources = [
+            source_item
+        ]
+
+    return {
+        "success": result.get(
+            "success",
+            False,
+        ),
+        "answer": result.get(
+            "answer"
+        ),
+        "report": None,
+        "context": None,
+        "warnings": (
+            result.get(
+                "warnings"
+            )
+            or []
+        ),
+        "sources": sources,
+        "retrieved_at": result.get(
+            "retrieved_at"
+        ),
+    }
+
+
+# ============================================================
+# NIB PUBLIC WEBSITE
+# ============================================================
+
+def handle_web(
+    prompt: str,
+) -> dict:
+
+    result = (
+        answer_nib_website_question(
+            question=prompt
+        )
+    )
+
+    return {
+        "success": result.get(
+            "success",
+            False,
+        ),
+        "answer": result.get(
+            "answer"
+        ),
+        "report": None,
+        "context": None,
+        "warnings": (
+            result.get(
+                "warnings"
+            )
+            or []
+        ),
+        "sources": (
+            result.get(
+                "sources"
+            )
+            or []
+        ),
+        "retrieved_at": result.get(
+            "retrieved_at"
+        ),
+    }
+
+
+# ============================================================
+# COMPETITOR INTELLIGENCE
+# ============================================================
+
+def handle_competitor(
+    prompt: str,
+) -> dict:
+
+    result = (
+        answer_competitor_question(
+            question=prompt
+        )
+    )
+
+    return {
+        "success": result.get(
+            "success",
+            False,
+        ),
+        "answer": result.get(
+            "answer"
+        ),
+        "report": None,
+        "context": None,
+        "warnings": (
+            result.get(
+                "warnings"
+            )
+            or []
+        ),
+        "sources": (
+            result.get(
+                "sources"
+            )
+            or []
+        ),
+        "retrieved_at": result.get(
+            "retrieved_at"
+        ),
+    }
+
+
+# ============================================================
+# GENERAL AI
+# ============================================================
+
+def handle_general(
+    database: Session,
+    payload: OrchestratorRequest,
+) -> dict:
+
+    normalized = (
+        " ".join(
+            (payload.prompt or "")
+            .lower()
+            .strip()
+            .split()
+        )
+    )
+
+    normalized_no_question = (
+        normalized.rstrip("?")
+    )
+
+    # --------------------------------------------------------
+    # Instant deterministic answers
+    # --------------------------------------------------------
+
+    if normalized_no_question in {
+        "who are you",
+        "what are you",
+        "what is nibgpt",
+        "introduce yourself",
+        "tell me about yourself",
+    }:
+
+        return {
+            "success": True,
+            "answer": (
+                "I am NIBGPT, NIB International Bank's AI assistant. "
+                "I can help with reporting, internal knowledge, "
+                "NIB public information, competitor intelligence, "
+                "and general questions."
+            ),
+            "report": None,
+            "context": None,
+            "warnings": [],
+            "sources": [],
+        }
+
+    if normalized_no_question in {
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    }:
+
+        return {
+            "success": True,
+            "answer": (
+                "Hello! I am NIBGPT. How can I help you?"
+            ),
+            "report": None,
+            "context": None,
+            "warnings": [],
+            "sources": [],
+        }
+
+    # --------------------------------------------------------
+    # Normal AI conversation
+    # --------------------------------------------------------
+
+    history = (
+        load_conversation_history(
+            database=database,
+            conversation_id=(
+                payload.conversation_id
+            ),
+            current_prompt=(
+                payload.prompt
+            ),
+        )
+    )
+
+    answer = (
+        answer_general_question(
+            prompt=payload.prompt,
+            history=history,
+        )
+    )
+
+    return {
+        "success": True,
+        "answer": answer,
+        "report": None,
+        "context": None,
+        "warnings": [],
+        "sources": [],
+    }
+
+
+# ============================================================
+# COMPETITOR ROUTING
+# ============================================================
+
+def is_competitor_request(
+    prompt: str,
+) -> bool:
+
+    try:
+
+        competitors = (
+            detect_competitors(
+                prompt
+            )
+        )
+
+        return bool(
+            competitors
+        )
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# MAIN NIBGPT ENDPOINT
 # ============================================================
 
 @router.post(
@@ -291,359 +762,207 @@ def ask_nibgpt(
         get_db
     ),
 ):
-    # --------------------------------------------------------
-    # 1. Protect explicit public-leadership questions.
+
+    prompt = (
+        payload.prompt
+        or ""
+    ).strip()
+
+    if not prompt:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Prompt is required.",
+        )
+
+    # ========================================================
+    # COMPETITOR
     #
-    # "district directors" contains the word "district", but
-    # it is NOT a governed-data request. Route it to the web
-    # agent before any reporting-context reconstruction.
-    # --------------------------------------------------------
+    # Competitor detection happens before the normal
+    # classifier because competitor intelligence is a
+    # separate approved-source system.
+    # ========================================================
 
-    if (
-        looks_like_nib_public_leadership_question(
-            payload.prompt
-        )
+    if is_competitor_request(
+        prompt
     ):
-        raw_decision = classify_prompt(
-            (
-                "NIB International Bank public "
-                "website leadership information"
-            )
+
+        route = "competitor"
+        confidence = 95
+
+        reason = (
+            "The prompt appears to request "
+            "approved competitor intelligence."
         )
 
-        # The classifier may still call the synthetic phrase
-        # general, so provide a small compatible decision
-        # object without importing internal dataclasses.
-        if raw_decision.route != "web":
-            class WebDecision:
-                route = "web"
-                confidence = 95
-                reason = (
-                    "The prompt appears to request "
-                    "public leadership information "
-                    "about NIB International Bank."
-                )
-
-            raw_decision = WebDecision()
-
-        return build_web_response(
-            payload=payload,
-            decision=raw_decision,
-        )
-        
-        # --------------------------------------------------------
-    # Competitor Public Intelligence
-    # --------------------------------------------------------
-
-    if is_competitor_question(
-        payload.prompt
-    ):
-        try:
-            competitor_result = (
-                answer_competitor_question(
-                    payload.prompt
-                )
-            )
-
-            return OrchestratorResponse(
-                route="competitor",
-                confidence=95,
-                reason=(
-                    "The prompt appears to request "
-                    "public competitor information."
-                ),
-                success=competitor_result.get(
-                    "success",
-                    False,
-                ),
-                answer=competitor_result.get(
-                    "answer"
-                ),
-                report=None,
-                context=None,
-                warnings=competitor_result.get(
-                    "warnings",
-                    [],
-                ),
-                sources=competitor_result.get(
-                    "sources",
-                    [],
-                ),
-                retrieved_at=competitor_result.get(
-                    "retrieved_at"
-                ),
-            )
-
-        except Exception as error:
-            return OrchestratorResponse(
-                route="competitor",
-                confidence=95,
-                reason=(
-                    "The prompt appears to request "
-                    "public competitor information."
-                ),
-                success=False,
-                answer=(
-                    "NIBGPT could not retrieve "
-                    "the requested competitor "
-                    "information."
-                ),
-                report=None,
-                context=None,
-                warnings=[
-                    str(error)
-                ],
-                sources=[],
-                retrieved_at=None,
-            )
-
-    # --------------------------------------------------------
-    # 2. Classify the CURRENT prompt before allowing an old
-    # reporting context to rewrite it.
-    # --------------------------------------------------------
-
-    current_decision = classify_prompt(
-        payload.prompt
-    )
-
-    # Explicit web request.
-    if current_decision.route == "web":
-        return build_web_response(
-            payload=payload,
-            decision=current_decision,
-        )
-
-    # Explicit institutional-knowledge request.
-    if current_decision.route == "knowledge":
-        return OrchestratorResponse(
-            route="knowledge",
-            confidence=(
-                current_decision.confidence
-            ),
-            reason=current_decision.reason,
-            success=True,
-            answer=(
-                "The Knowledge Agent is not connected yet. "
-                "This request was correctly identified as "
-                "a knowledge question."
-            ),
-            report=None,
-            context=None,
-            warnings=[],
-            sources=[],
-            retrieved_at=None,
-        )
-
-    # --------------------------------------------------------
-    # 3. Determine whether this is a reporting request or a
-    # reporting follow-up.
-    # --------------------------------------------------------
-
-    saved_context = (
-        payload.context.model_dump()
-        if payload.context
-        else None
-    )
-
-    if saved_context is None:
-        saved_context = (
-            get_saved_reporting_context(
-                database=database,
-                conversation_id=(
-                    payload.conversation_id
-                ),
-            )
-        )
-
-    is_reporting_follow_up = (
-        saved_context is not None
-        and is_follow_up_prompt(
-            payload.prompt
-        )
-    )
-
-    is_reporting_request = (
-        current_decision.route
-        == "reporting"
-        or is_reporting_follow_up
-    )
-
-    # A normal general question must never be rewritten from
-    # old reporting context.
-    if not is_reporting_request:
-        return OrchestratorResponse(
-            route="general",
-            confidence=(
-                current_decision.confidence
-            ),
-            reason=current_decision.reason,
-            success=True,
-            answer=None,
-            report=None,
-            context=None,
-            warnings=[],
-            sources=[],
-            retrieved_at=None,
-        )
-
-    # --------------------------------------------------------
-    # 4. Resolve reporting context only for reporting.
-    # --------------------------------------------------------
-
-    previous_context = (
-        saved_context
-    )
-
-    if (
-        previous_context is None
-        and payload.conversation_id
-        is not None
-    ):
-        previous_context = (
-            rebuild_reporting_context(
-                database=database,
-                conversation_id=(
-                    payload.conversation_id
-                ),
-                current_prompt=(
-                    payload.prompt
-                ),
-            )
-        )
-
-    merged_context = (
-        merge_reporting_context(
-            previous_context=(
-                previous_context
-            ),
-            prompt=payload.prompt,
-        )
-    )
-
-    if previous_context:
-        effective_prompt = (
-            build_prompt_from_context(
-                merged_context
-            )
-        )
     else:
-        effective_prompt = (
-            payload.prompt
+
+        decision = classify_prompt(
+            prompt
         )
 
-    # Reclassify the fully rebuilt reporting prompt.
-    decision = classify_prompt(
-        effective_prompt
-    )
+        route = decision.route
+        confidence = (
+            decision.confidence
+        )
+        reason = (
+            decision.reason
+        )
 
-    # --------------------------------------------------------
-    # 5. Governed Reporting Agent
-    # --------------------------------------------------------
+    try:
 
-    if decision.route == "reporting":
-        report = (
-            execute_governed_prompt(
+        # ====================================================
+        # REPORTING
+        # ====================================================
+
+        if route == "reporting":
+
+            result = handle_reporting(
                 database=database,
-                prompt=effective_prompt,
-                domain_id=None,
-                requested_limit=(
-                    payload.requested_limit
-                ),
-                maximum_entities=(
-                    payload.maximum_entities
-                ),
-                maximum_path_depth=(
-                    payload.maximum_path_depth
-                ),
-                user_role=(
-                    payload.user_role
-                ),
-            )
-        )
-
-        if (
-            report.get(
-                "success",
-                False,
-            )
-            and payload.conversation_id
-            is not None
-        ):
-            conversation = (
-                database.get(
-                    Conversation,
-                    payload.conversation_id,
-                )
+                payload=payload,
             )
 
-            if conversation is not None:
-                conversation.reporting_context = (
-                    merged_context
-                )
+        # ====================================================
+        # INTERNAL DOCUMENTS
+        # ====================================================
 
-                conversation.updated_at = (
-                    datetime.utcnow()
-                )
+        elif route == "knowledge":
 
-                database.commit()
+            # Document answers are generated by the
+            # streaming endpoint.
+            #
+            # /ask only performs routing here so we do
+            # not generate the same document answer twice.
+
+            result = {
+                "success": True,
+                "answer": None,
+                "report": None,
+                "context": None,
+                "warnings": [],
+                "sources": [],
+            }
+
+        # ====================================================
+        # NIB PUBLIC WEBSITE
+        # ====================================================
+
+        elif route == "web":
+
+            result = handle_web(
+                prompt=prompt
+            )
+
+        # ====================================================
+        # COMPETITOR INTELLIGENCE
+        # ====================================================
+
+        elif route == "competitor":
+
+            result = handle_competitor(
+                prompt=prompt
+            )
+
+        # ====================================================
+        # GENERAL CHAT
+        #
+        # General answers are generated by the streaming
+        # endpoint. /ask only performs routing for this route.
+        # This avoids generating the same answer twice.
+        # ====================================================
+
+        else:
+
+            result = {
+                "success": True,
+                "answer": None,
+                "report": None,
+                "context": None,
+                "warnings": [],
+                "sources": [],
+            }
+
+    except ValueError as error:
 
         return OrchestratorResponse(
-            route="reporting",
-            confidence=(
-                decision.confidence
+            route=route,
+            confidence=confidence,
+            reason=reason,
+            success=False,
+            answer=str(
+                error
             ),
-            reason=decision.reason,
-            success=report.get(
-                "success",
-                False,
-            ),
-            answer=report.get(
-                "answer"
-            ),
-            report=report,
-            context=ReportingContext(
-                **merged_context
-            ),
-            warnings=report.get(
-                "warnings",
-                [],
-            ),
+            report=None,
+            context=None,
+            warnings=[
+                str(error)
+            ],
             sources=[],
-            retrieved_at=None,
         )
 
-    # This should be rare, but do not execute another route
-    # implicitly after reporting-context reconstruction.
+    except Exception as error:
+
+        return OrchestratorResponse(
+            route=route,
+            confidence=confidence,
+            reason=reason,
+            success=False,
+            answer=(
+                "NIBGPT could not complete "
+                "the request."
+            ),
+            report=None,
+            context=None,
+            warnings=[
+                str(error)
+            ],
+            sources=[],
+        )
+
     return OrchestratorResponse(
-        route=(
-            getattr(
-                decision,
-                "route",
-                "general",
-            )
+        route=route,
+        confidence=confidence,
+        reason=reason,
+        success=result.get(
+            "success",
+            False,
         ),
-        confidence=(
-            getattr(
-                decision,
-                "confidence",
-                0,
-            )
+        answer=result.get(
+            "answer"
         ),
-        reason=(
-            getattr(
-                decision,
-                "reason",
-                "Unknown route",
-            )
+        report=result.get(
+            "report"
         ),
-        success=False,
-        answer=(
-            "The request could not be processed "
-            "with the selected route."
+        context=result.get(
+            "context"
         ),
-        report=None,
-        context=None,
-        warnings=[],
-        sources=[],
-        retrieved_at=None,
+        warnings=result.get(
+            "warnings",
+            [],
+        ),
+        sources=result.get(
+            "sources",
+            [],
+        ),
     )
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@router.get(
+    "/health"
+)
+def orchestrator_health():
+
+    return {
+        "service":
+            "NIBGPT Orchestrator",
+        "status":
+            "ok",
+        "timestamp":
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
+    }

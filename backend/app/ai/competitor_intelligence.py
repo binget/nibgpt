@@ -18,6 +18,14 @@ from app.ai.competitor_retriever import (
     fetch_competitor_page,
 )
 
+from urllib.parse import (
+    urljoin,
+)
+
+from app.ai.competitor_seed_paths import (
+    COMPETITOR_SEED_PATHS,
+)
+
 
 COMPETITOR_SYSTEM_PROMPT = """
 You are NIBGPT's Competitor Intelligence Agent.
@@ -59,6 +67,34 @@ Rules:
   4 concise bullets.
 """.strip()
 
+def get_seed_urls(
+    source,
+    product_type: str | None,
+) -> list[str]:
+    if not product_type:
+        return []
+
+    bank_paths = (
+        COMPETITOR_SEED_PATHS.get(
+            source.key,
+            {}
+        )
+    )
+
+    paths = (
+        bank_paths.get(
+            product_type,
+            []
+        )
+    )
+
+    return [
+        urljoin(
+            source.base_url,
+            path,
+        )
+        for path in paths
+    ]
 
 def normalize_terms(
     text: str,
@@ -76,7 +112,7 @@ def normalize_terms(
 def select_competitor_pages(
     question: str,
     source,
-    maximum_pages: int = 2,
+    maximum_pages: int = 3,
 ) -> list[dict]:
     question_terms = (
         normalize_terms(
@@ -84,52 +120,247 @@ def select_competitor_pages(
         )
     )
 
-    urls = (
-        discover_competitor_links(
-            source=source,
-            maximum_links=60,
+    product_type = (
+        detect_competitor_product_request(
+            question
         )
     )
 
-    scored = []
-
-    for url in urls:
-        url_terms = (
-            normalize_terms(
-                url.replace(
-                    "-",
-                    " "
-                )
-            )
+    topic_keywords = (
+        get_topic_keywords(
+            question
         )
+    )
 
-        score = len(
-            question_terms
-            & url_terms
+    page_limit = (
+        4
+        if product_type == "loan"
+        else maximum_pages
+    )
+
+    seed_urls = (
+        get_seed_urls(
+            source=source,
+            product_type=product_type,
         )
-
-        scored.append(
-            (
-                score,
-                url,
-            )
-        )
-
-    scored.sort(
-        key=lambda item:
-            item[0],
-        reverse=True,
     )
 
     pages = []
+    seen_urls = set()
 
-    for _, url in scored[
-        :maximum_pages
-    ]:
+    # ==================================================
+    # 1. Fetch approved seed URLs first
+    # ==================================================
+
+    for url in seed_urls:
+        if len(pages) >= page_limit:
+            break
+
+        try:
+            page = fetch_competitor_page(
+                url=url,
+                source=source,
+            )
+
+            text = (
+                page.get("text")
+                or ""
+            )
+
+            if len(text) < 80:
+                continue
+
+            final_url = (
+                page.get("url")
+                or url
+            )
+
+            if final_url in seen_urls:
+                continue
+
+            seen_urls.add(
+                final_url
+            )
+
+            pages.append(
+                page
+            )
+
+        except Exception as error:
+            print(
+                "SEED FETCH WARNING:",
+                url,
+                str(error),
+            )
+
+    # ==================================================
+    # 2. Discover additional URLs only if needed
+    # ==================================================
+
+    if (
+        len(pages) < page_limit
+        and not seed_urls
+    ):
+        urls = (
+            discover_competitor_links(
+                source=source,
+                maximum_links=150,
+            )
+        )
+
+        scored = []
+
+        for url in urls:
+            if url in seen_urls:
+                continue
+
+            normalized_url = (
+                url.lower()
+                .replace("-", " ")
+                .replace("_", " ")
+            )
+
+            url_terms = (
+                normalize_terms(
+                    normalized_url
+                )
+            )
+
+            score = len(
+                question_terms
+                & url_terms
+            )
+
+            for keyword in topic_keywords:
+                normalized_keyword = (
+                    keyword.lower()
+                    .replace("-", " ")
+                    .replace("_", " ")
+                )
+
+                if (
+                    normalized_keyword
+                    in normalized_url
+                ):
+                    score += 15
+
+            if product_type == "loan":
+                lowered_url = (
+                    url.lower()
+                )
+
+                if (
+                    "/credit/"
+                    in lowered_url
+                ):
+                    score += 40
+
+                if (
+                    "/products/loan"
+                    in lowered_url
+                ):
+                    score += 40
+
+                loan_unrelated = (
+                    "/deposit",
+                    "/trade-services",
+                    "/diaspora",
+                    "/announcement",
+                    "/news",
+                    "/cbe-resources/",
+                    "/cbe-noor/",
+                    "/cbenoor-",
+                    "/noor-",
+                )
+
+                if any(
+                    term in lowered_url
+                    for term in loan_unrelated
+                ):
+                    score -= 100
+
+            unrelated_terms = (
+                "/about-us/",
+                "/career",
+                "/vacancy",
+                "/news",
+                "/contact",
+                "/board",
+                "/management",
+                "/privacy",
+                "/security",
+            )
+
+            if any(
+                term in url.lower()
+                for term in unrelated_terms
+            ):
+                score -= 50
+
+            scored.append(
+                (
+                    score,
+                    url,
+                )
+            )
+
+        scored.sort(
+            key=lambda item:
+                item[0],
+            reverse=True,
+        )
+
+        for score, url in scored:
+            if len(pages) >= page_limit:
+                break
+
+            if score <= 0:
+                continue
+
+            try:
+                page = (
+                    fetch_competitor_page(
+                        url=url,
+                        source=source,
+                    )
+                )
+
+                text = (
+                    page.get("text")
+                    or ""
+                )
+
+                if len(text) < 80:
+                    continue
+
+                final_url = (
+                    page.get("url")
+                    or url
+                )
+
+                if final_url in seen_urls:
+                    continue
+
+                seen_urls.add(
+                    final_url
+                )
+
+                pages.append(
+                    page
+                )
+
+            except Exception:
+                continue
+
+    # ==================================================
+    # 3. Final fallback
+    # ==================================================
+
+    if not pages:
         try:
             page = (
                 fetch_competitor_page(
-                    url=url,
+                    url=source.base_url,
                     source=source,
                 )
             )
@@ -140,16 +371,7 @@ def select_competitor_pages(
                 )
 
         except Exception:
-            continue
-
-    # Fallback to homepage.
-    if not pages:
-        pages.append(
-            fetch_competitor_page(
-                url=source.base_url,
-                source=source,
-            )
-        )
+            pass
 
     return pages
 
@@ -423,6 +645,60 @@ def answer_competitor_question(
                 f"Content:\n{text}"
             )
         )
+        
+        # ==================================================
+    # Simple competitor product/service questions
+    # bypass Ollama completely.
+    # ==================================================
+
+    if len(competitors) == 1:
+        direct_answer = (
+            build_competitor_product_answer(
+                question=question,
+                pages=all_pages,
+            )
+        )
+
+        if direct_answer:
+            retrieved_at = (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            )
+
+            return {
+                "success": True,
+
+                "answer":
+                    direct_answer,
+
+                "source_type":
+                    "competitor_public_web",
+
+                "retrieved_at":
+                    retrieved_at,
+
+                "warnings": [],
+
+                "sources": [
+                    {
+                        "title":
+                            page.get(
+                                "title"
+                            ),
+
+                        "url":
+                            page["url"],
+
+                        "bank_name":
+                            page["bank_name"],
+
+                        "trust_level":
+                            "official",
+                    }
+                    for page in all_pages
+                ],
+            }
 
     provider = (
         get_ai_provider()
@@ -473,7 +749,80 @@ def answer_competitor_question(
         ],
     }
 
+def get_topic_keywords(
+    question: str,
+) -> tuple[str, ...]:
+    product_type = (
+        detect_competitor_product_request(
+            question
+        )
+    )
 
+    mapping = {
+        "digital_banking": (
+            "digital",
+            "mobile",
+            "internet",
+            "wallet",
+            "ways-of-banking",
+            "cbe-birr",
+            "ethio-direct",
+        ),
+
+        "loan": (
+            "loan",
+            "loans",
+            "credit",
+            "financing",
+            "mortgage",
+            "overdraft",
+            "term-loan",
+            "term loan",
+            "vehicle",
+            "agriculture",
+            "construction",
+            "merchandise",
+        ),
+
+        "deposit": (
+            "deposit",
+            "saving",
+            "savings",
+            "current",
+            "fixed",
+            "account",
+        ),
+
+        "trade": (
+            "trade",
+            "letter-of-credit",
+            "lc",
+            "guarantee",
+            "documentary",
+            "import",
+            "export",
+        ),
+
+        "interest_free": (
+            "interest-free",
+            "ifb",
+            "noor",
+            "sharia",
+        ),
+
+        "forex": (
+            "forex",
+            "foreign-exchange",
+            "currency",
+            "remittance",
+        ),
+    }
+
+    return mapping.get(
+        product_type,
+        (),
+    )
+    
 def normalize_question(
     question: str,
 ) -> str:
@@ -481,6 +830,272 @@ def normalize_question(
         question.lower().split()
     )
 
+def detect_competitor_product_request(
+    question: str,
+) -> str | None:
+    normalized = (
+        " ".join(
+            question.lower().split()
+        )
+    )
+
+    groups = {
+        "digital_banking": [
+            "digital banking",
+            "mobile banking",
+            "internet banking",
+            "online banking",
+            "wallet",
+        ],
+
+        "loan": [
+            "loan",
+            "loans",
+            "credit",
+            "financing",
+        ],
+
+        "deposit": [
+            "deposit",
+            "deposits",
+            "saving",
+            "savings",
+            "current account",
+            "fixed deposit",
+        ],
+
+        "trade": [
+            "trade finance",
+            "trade service",
+            "trade services",
+            "letter of credit",
+            "lc",
+            "guarantee",
+        ],
+
+        "interest_free": [
+            "interest free",
+            "interest-free",
+            "ifb",
+            "islamic banking",
+        ],
+
+        "forex": [
+            "forex",
+            "foreign exchange",
+            "currency exchange",
+        ],
+    }
+
+    for group, terms in groups.items():
+        if any(
+            term in normalized
+            for term in terms
+        ):
+            return group
+
+    return None
+
+def extract_competitor_product_facts(
+    question: str,
+    pages: list[dict],
+) -> list[str]:
+    product_type = (
+        detect_competitor_product_request(
+            question
+        )
+    )
+
+    if not product_type:
+        return []
+
+    keywords = {
+        "digital_banking": [
+            "mobile banking",
+            "internet banking",
+            "digital banking",
+            "wallet",
+            "cbe birr",
+            "ethio direct",
+            "mobile app",
+            "mobile application",
+            "transfer",
+            "payment",
+            "airtime",
+        ],
+
+        "loan": [
+            "loan",
+            "credit",
+            "financing",
+        ],
+
+        "deposit": [
+            "deposit",
+            "saving",
+            "savings",
+            "current account",
+            "fixed deposit",
+        ],
+
+        "trade": [
+            "trade",
+            "letter of credit",
+            "documentary",
+            "guarantee",
+            "lc",
+        ],
+
+        "interest_free": [
+            "interest free",
+            "interest-free",
+            "ifb",
+            "noor",
+            "sharia",
+        ],
+
+        "forex": [
+            "forex",
+            "foreign exchange",
+            "currency",
+        ],
+    }
+
+    wanted = keywords.get(
+        product_type,
+        [],
+    )
+
+    blocked = (
+        "vulnerability",
+        "privacy policy",
+        "cookie",
+        "copyright",
+        "terms and conditions",
+        "security disclosure",
+        "responsible disclosure",
+        "useful links",
+        "contact us",
+    )
+
+    facts = []
+    seen = set()
+
+    for page in pages:
+        text = (
+            page.get("text")
+            or ""
+        )
+
+        lines = [
+            " ".join(
+                line.split()
+            )
+            for line in text.splitlines()
+            if line.strip()
+        ]
+
+        for line in lines:
+            lowered = (
+                line.lower()
+            )
+
+            if any(
+                bad in lowered
+                for bad in blocked
+            ):
+                continue
+
+            if not any(
+                keyword in lowered
+                for keyword in wanted
+            ):
+                continue
+
+            # Ignore very long navigation/footer lines.
+            if len(line) > 250:
+                continue
+
+            key = lowered
+
+            if key in seen:
+                continue
+
+            seen.add(
+                key
+            )
+
+            facts.append(
+                line
+            )
+
+            if len(facts) >= 12:
+                return facts
+
+    return facts
+
+def build_competitor_product_answer(
+    question: str,
+    pages: list[dict],
+) -> str | None:
+    facts = (
+        extract_competitor_product_facts(
+            question=question,
+            pages=pages,
+        )
+    )
+
+    if not facts:
+        return None
+
+    bank_name = (
+        pages[0].get(
+            "bank_name"
+        )
+        if pages
+        else "The bank"
+    )
+
+    product_type = (
+        detect_competitor_product_request(
+            question
+        )
+    )
+
+    labels = {
+        "digital_banking":
+            "Digital Banking Services",
+
+        "loan":
+            "Loan and Financing Services",
+
+        "deposit":
+            "Deposit Products",
+
+        "trade":
+            "Trade Finance Services",
+
+        "interest_free":
+            "Interest-Free Banking Services",
+
+        "forex":
+            "Foreign Exchange Services",
+    }
+
+    heading = labels.get(
+        product_type,
+        "Public Banking Services",
+    )
+
+    bullets = "\n".join(
+        f"- {fact}"
+        for fact in facts
+    )
+
+    return (
+        f"**{bank_name} — {heading}**\n\n"
+        f"{bullets}"
+    )
 
 def detect_competitors(
     question: str,
