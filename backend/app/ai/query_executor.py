@@ -78,15 +78,18 @@ def validate_read_only_sql(
 
     cleaned = sql.strip()
 
-    # Compiler-generated reports should currently
-    # always be SELECT statements.
+    # Compiler-generated reports must remain read-only.
+    # Allow either:
+    #   SELECT ...
+    # or:
+    #   WITH ... SELECT ...
     if not re.match(
-        r"^SELECT\b",
+        r"^(SELECT\b|WITH\b[\s\S]*\bSELECT\b)",
         cleaned,
         flags=re.IGNORECASE,
     ):
         raise ValueError(
-            "Only SELECT statements may be executed."
+            "Only read-only SELECT statements may be executed."
         )
 
     # Do not allow multiple statements.
@@ -168,6 +171,8 @@ def execute_governed_prompt(
     maximum_entities: int,
     maximum_path_depth: int,
     user_role: str,
+    branch_scope_value: str | None = None,
+    allow_confidential_aggregate: bool = False,
 ) -> dict[str, Any]:
 
     compilation_result = (
@@ -175,16 +180,14 @@ def execute_governed_prompt(
             database=database,
             prompt=prompt,
             domain_id=domain_id,
-            requested_limit=(
-                requested_limit
-            ),
-            maximum_entities=(
-                maximum_entities
-            ),
-            maximum_path_depth=(
-                maximum_path_depth
-            ),
+            requested_limit=requested_limit,
+            maximum_entities=maximum_entities,
+            maximum_path_depth=maximum_path_depth,
             user_role=user_role,
+            branch_scope_value=branch_scope_value,
+            allow_confidential_aggregate=(
+                allow_confidential_aggregate
+            ),
         )
     )
 

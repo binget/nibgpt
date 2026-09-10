@@ -247,6 +247,7 @@ def parameter_placeholder(
 
 def calculate_date_range(
     operator: str,
+    value: object = None,
 ) -> tuple[
     date,
     date,
@@ -319,6 +320,36 @@ def calculate_date_range(
         return (
             start,
             start + timedelta(days=7),
+        )
+        
+    if operator == "rolling_months":
+        try:
+            months = int(value)
+        except (TypeError, ValueError):
+            return None
+
+        if months < 1 or months > 120:
+            return None
+
+        # Rolling calendar periods use completed months.
+        # Current incomplete month is excluded.
+        end = today.replace(day=1)
+
+        total_months = (
+            end.year * 12
+            + (end.month - 1)
+            - months
+        )
+
+        start = date(
+            total_months // 12,
+            total_months % 12 + 1,
+            1,
+        )
+
+        return (
+            start,
+            end,
         )
 
     if operator == "this_month":
@@ -428,6 +459,110 @@ def calculate_date_range(
 
     return None
 
+def time_grain_expression(
+    alias: str,
+    column: object,
+    dialect: str,
+    time_grain: str | None,
+) -> str:
+    reference = column_reference(
+        alias,
+        column.column_name,
+        dialect,
+    )
+
+    if time_grain is None:
+        return reference
+
+    data_type = (
+        column.data_type
+        or ""
+    ).lower()
+
+    numeric_date = any(
+        numeric_type in data_type
+        for numeric_type in (
+            "number",
+            "numeric",
+            "decimal",
+            "integer",
+            "int",
+        )
+    )
+
+    # --------------------------------------------------
+    # Legacy numeric YYYYMMDD dates
+    # --------------------------------------------------
+
+    if numeric_date:
+        if time_grain == "day":
+            return reference
+
+        if time_grain == "month":
+            return (
+                f"FLOOR({reference} / 100)"
+            )
+
+        if time_grain == "year":
+            return (
+                f"FLOOR({reference} / 10000)"
+            )
+
+        if time_grain == "quarter":
+            return (
+                "CONCAT("
+                f"FLOOR({reference} / 10000), "
+                "'-Q' || "
+                "CEIL("
+                f"MOD(FLOOR({reference} / 100), 100) / 3"
+                ")"
+                ")"
+            )
+
+        # Weekly grouping for numeric YYYYMMDD requires
+        # conversion to a real date first.
+        if time_grain == "week":
+            return (
+                "TRUNC("
+                "TO_DATE("
+                f"TO_CHAR({reference}), "
+                "'YYYYMMDD'"
+                "), "
+                "'IW'"
+                ")"
+            )
+
+    # --------------------------------------------------
+    # Native DATE/TIMESTAMP
+    # --------------------------------------------------
+
+    if dialect.lower() == "oracle":
+        if time_grain == "day":
+            return (
+                f"TRUNC({reference})"
+            )
+
+        if time_grain == "week":
+            return (
+                f"TRUNC({reference}, 'IW')"
+            )
+
+        if time_grain == "month":
+            return (
+                f"TRUNC({reference}, 'MM')"
+            )
+
+        if time_grain == "quarter":
+            return (
+                f"TRUNC({reference}, 'Q')"
+            )
+
+        if time_grain == "year":
+            return (
+                f"TRUNC({reference}, 'YYYY')"
+            )
+
+    return reference
 
 def compile_filter(
     planned_filter: PlannedFilter,
@@ -510,7 +645,8 @@ def compile_filter(
     # --------------------------------------------------
 
     date_range = calculate_date_range(
-        operator
+        operator,
+        planned_filter.value,
     )
 
     if date_range:
@@ -528,17 +664,55 @@ def compile_filter(
         )
         parameter_index += 1
 
+        column_data_type = (
+            column.data_type or ""
+        ).lower()
+
+        if any(
+            numeric_type in column_data_type
+            for numeric_type in (
+                "number",
+                "numeric",
+                "decimal",
+                "integer",
+                "int",
+            )
+        ):
+            # Legacy/Core Banking numeric date storage:
+            # YYYYMMDD
+            start_parameter_value = int(
+                start_value.strftime("%Y%m%d")
+            )
+
+            end_parameter_value = int(
+                end_value.strftime("%Y%m%d")
+            )
+
+            parameter_data_type = "integer"
+
+        else:
+            start_parameter_value = (
+                start_value.isoformat()
+            )
+
+            end_parameter_value = (
+                end_value.isoformat()
+            )
+
+            parameter_data_type = "date"
+
+
         parameters.extend(
             [
                 CompiledParameter(
                     name=start_name,
-                    value=start_value.isoformat(),
-                    data_type="date",
+                    value=start_parameter_value,
+                    data_type=parameter_data_type,
                 ),
                 CompiledParameter(
                     name=end_name,
-                    value=end_value.isoformat(),
-                    data_type="date",
+                    value=end_parameter_value,
+                    data_type=parameter_data_type,
                 ),
             ]
         )
@@ -627,106 +801,160 @@ def compile_filter(
     # --------------------------------------------------
 
     if operator == "between_or_between":
-        raw_value = str(
-            planned_filter.value
-            or ""
-        )
+            raw_value = str(
+                planned_filter.value
+                or ""
+            )
 
-        ranges = []
+            column_data_type = (
+                column.data_type
+                or ""
+            ).strip().upper()
 
-        for part in raw_value.split("|"):
-            bounds = [
-                item.strip()
-                for item in part.split(",")
-            ]
+            numeric_types = (
+                "NUMBER",
+                "INTEGER",
+                "INT",
+                "DECIMAL",
+                "NUMERIC",
+                "FLOAT",
+                "DOUBLE",
+            )
 
-            if len(bounds) != 2:
+            text_types = (
+                "VARCHAR",
+                "VARCHAR2",
+                "CHAR",
+                "NCHAR",
+                "NVARCHAR",
+                "NVARCHAR2",
+                "TEXT",
+                "CLOB",
+            )
+
+            is_numeric_column = any(
+                numeric_type in column_data_type
+                for numeric_type in numeric_types
+            )
+
+            is_text_column = any(
+                text_type in column_data_type
+                for text_type in text_types
+            )
+
+            ranges = []
+
+            for part in raw_value.split("|"):
+                bounds = [
+                    item.strip()
+                    for item in part.split(",")
+                ]
+
+                if len(bounds) != 2:
+                    raise ValueError(
+                        "between_or_between requires "
+                        "ranges in the form "
+                        "'start,end|start,end'."
+                    )
+
+                if is_numeric_column:
+                    try:
+                        start_value = int(
+                            bounds[0]
+                        )
+                        end_value = int(
+                            bounds[1]
+                        )
+
+                    except ValueError as error:
+                        raise ValueError(
+                            "between_or_between values "
+                            "must be numeric for "
+                            "numeric columns."
+                        ) from error
+
+                    parameter_data_type = "int"
+
+                elif is_text_column:
+                    start_value = bounds[0]
+                    end_value = bounds[1]
+                    parameter_data_type = "string"
+
+                else:
+                    # Safe generic fallback:
+                    # preserve source values as strings rather
+                    # than forcing an implicit numeric conversion.
+                    start_value = bounds[0]
+                    end_value = bounds[1]
+                    parameter_data_type = "string"
+
+                ranges.append(
+                    (
+                        start_value,
+                        end_value,
+                        parameter_data_type,
+                    )
+                )
+
+            if len(ranges) != 2:
                 raise ValueError(
                     "between_or_between requires "
-                    "ranges in the form "
-                    "'start,end|start,end'."
+                    "exactly two ranges."
                 )
 
-            try:
-                start_value = int(
-                    bounds[0]
-                )
-                end_value = int(
-                    bounds[1]
+            expressions = []
+
+            def governed_literal(
+                value,
+                parameter_data_type,
+            ):
+                if parameter_data_type == "int":
+                    return str(int(value))
+
+                escaped_value = str(
+                    value
+                ).replace(
+                    "'",
+                    "''",
                 )
 
-            except ValueError as error:
-                raise ValueError(
-                    "between_or_between values "
-                    "must be numeric."
-                ) from error
+                return (
+                    "'"
+                    + escaped_value
+                    + "'"
+                )
 
-            ranges.append(
-                (
+            for (
+                start_value,
+                end_value,
+                parameter_data_type,
+            ) in ranges:
+                start_literal = governed_literal(
                     start_value,
+                    parameter_data_type,
+                )
+
+                end_literal = governed_literal(
                     end_value,
+                    parameter_data_type,
                 )
-            )
 
-        if len(ranges) != 2:
-            raise ValueError(
-                "between_or_between requires "
-                "exactly two ranges."
-            )
-
-        expressions = []
-
-        for (
-            start_value,
-            end_value,
-        ) in ranges:
-            start_name = (
-                f"p{parameter_index}"
-            )
-            parameter_index += 1
-
-            end_name = (
-                f"p{parameter_index}"
-            )
-            parameter_index += 1
-
-            parameters.extend(
-                [
-                    CompiledParameter(
-                        name=start_name,
-                        value=start_value,
-                        data_type="int",
-                    ),
-                    CompiledParameter(
-                        name=end_name,
-                        value=end_value,
-                        data_type="int",
-                    ),
-                ]
-            )
-
-            expressions.append(
-                (
-                    f"{reference} BETWEEN "
-                    f"{parameter_placeholder(start_name, dialect)} "
-                    f"AND "
-                    f"{parameter_placeholder(end_name, dialect)}"
+                expressions.append(
+                    (
+                        f"{reference} BETWEEN "
+                        f"{start_literal} "
+                        f"AND "
+                        f"{end_literal}"
+                    )
                 )
-            )
 
-        expression = (
-            "("
-            + " OR ".join(
-                expressions
+            return (
+                "("
+                + " OR ".join(expressions)
+                + ")",
+                parameters,
+                parameter_index,
             )
-            + ")"
-        )
-
-        return (
-            expression,
-            parameters,
-            parameter_index,
-        )
 
     # --------------------------------------------------
     # Normal comparison operators
@@ -1168,10 +1396,15 @@ def compile_governed_plan(
             .column
         )
 
-        expression = column_reference(
-            alias,
-            column.column_name,
-            dialect,
+        expression = time_grain_expression(
+            alias=alias,
+            column=column,
+            dialect=dialect,
+            time_grain=getattr(
+                grouping,
+                "time_grain",
+                None,
+            ),
         )
 
         result_alias = (
@@ -1228,6 +1461,54 @@ def compile_governed_plan(
                 column.column_name,
                 dialect,
             )
+            
+            # --------------------------------------------------
+            # Time-grained grouping ordering
+            #
+            # If ORDER BY targets the same physical column used
+            # by a time-grained GROUP BY, order by the exact same
+            # compiled time expression.
+            #
+            # Example:
+            #
+            # GROUP BY FLOOR(OPENINGDATE / 100)
+            # ORDER BY FLOOR(OPENINGDATE / 100)
+            # --------------------------------------------------
+
+            time_grouping = next(
+                (
+                    grouping
+                    for grouping in plan.group_by
+                    if (
+                        grouping.table.table.id
+                        == table.id
+                        and grouping
+                        .resolved_column
+                        .column
+                        .id
+                        == column.id
+                        and getattr(
+                            grouping,
+                            "time_grain",
+                            None,
+                        )
+                        is not None
+                    )
+                ),
+                None,
+            )
+
+            if time_grouping is not None:
+                reference = time_grain_expression(
+                    alias=alias,
+                    column=column,
+                    dialect=dialect,
+                    time_grain=getattr(
+                        time_grouping,
+                        "time_grain",
+                        None,
+                    ),
+                )
 
             output_name = (
                 column.business_name
@@ -1501,6 +1782,162 @@ def compile_governed_plan(
     having_clauses = []
     parameter_index = 1
 
+    # --------------------------------------------------
+    # Snapshot-period selection
+    #
+    # Snapshot measures represent state at a point in
+    # time. For grouped historical analysis, select the
+    # latest available snapshot once per requested period
+    # and join the fact rows to those snapshot dates.
+    #
+    # This avoids a correlated MAX() subquery against
+    # every fact row.
+    #
+    # Driven entirely by measure metadata.
+    # --------------------------------------------------
+
+    snapshot_period_cte = None
+    snapshot_period_join = None
+    snapshot_period_context = None
+    snapshot_time_parameters = None
+
+    snapshot_candidates = []
+
+    if plan.aggregation is not None:
+        snapshot_candidates.append(
+            plan.aggregation
+        )
+
+    for aggregation in getattr(
+        plan,
+        "aggregations",
+        [],
+    ) or []:
+        if aggregation not in snapshot_candidates:
+            snapshot_candidates.append(
+                aggregation
+            )
+
+    effective_snapshot_aggregation = next(
+        (
+            aggregation
+            for aggregation in snapshot_candidates
+            if (
+                getattr(
+                    aggregation,
+                    "temporal_behavior",
+                    None,
+                )
+                == "snapshot"
+                and getattr(
+                    aggregation,
+                    "period_selection",
+                    None,
+                )
+                == "latest_snapshot"
+                and getattr(
+                    aggregation,
+                    "time_axis_table",
+                    None,
+                )
+                is not None
+                and getattr(
+                    aggregation,
+                    "time_axis_column",
+                    None,
+                )
+                is not None
+            )
+        ),
+        None,
+    )
+
+    if effective_snapshot_aggregation is not None:
+        snapshot_table = (
+            effective_snapshot_aggregation
+            .time_axis_table
+            .table
+        )
+
+        snapshot_column = (
+            effective_snapshot_aggregation
+            .time_axis_column
+            .column
+        )
+
+        snapshot_alias = table_aliases[
+            snapshot_table.id
+        ]
+
+        snapshot_reference = (
+            column_reference(
+                snapshot_alias,
+                snapshot_column.column_name,
+                dialect,
+            )
+        )
+
+        snapshot_grouping = next(
+            (
+                grouping
+                for grouping in plan.group_by
+                if (
+                    grouping.table.table.id
+                    == snapshot_table.id
+                    and getattr(
+                        grouping,
+                        "time_grain",
+                        None,
+                    )
+                    is not None
+                )
+            ),
+            None,
+        )
+
+        if snapshot_grouping is not None:
+            cte_alias = "snapshot_period"
+            cte_source_alias = "snapshot_src"
+
+            cte_snapshot_reference = (
+                column_reference(
+                    cte_source_alias,
+                    snapshot_column.column_name,
+                    dialect,
+                )
+            )
+
+            cte_period_expression = (
+                time_grain_expression(
+                    alias=cte_source_alias,
+                    column=snapshot_column,
+                    dialect=dialect,
+                    time_grain=(
+                        snapshot_grouping.time_grain
+                    ),
+                )
+            )
+
+            historical_table_name = (
+                qualified_table_name(
+                    snapshot_table.schema_name,
+                    snapshot_table.table_name,
+                    dialect,
+                )
+            )
+
+            snapshot_period_context = {
+                "table": snapshot_table,
+                "column": snapshot_column,
+                "cte_alias": cte_alias,
+                "cte_source_alias": cte_source_alias,
+                "snapshot_reference": snapshot_reference,
+                "cte_snapshot_reference": cte_snapshot_reference,
+                "cte_period_expression": cte_period_expression,
+                "historical_table_name": historical_table_name,
+                "time_grain": snapshot_grouping.time_grain,
+            }
+
     for planned_filter in (
         plan.filters
     ):
@@ -1528,12 +1965,540 @@ def compile_governed_plan(
 
             return compiled
 
+        is_snapshot_time_range = False
+
+        # Capture the governed snapshot time-axis range.
+        # For snapshot sources that are UNION ALL views,
+        # use trusted compiler-derived literals for this
+        # physical pruning predicate so Oracle can prune
+        # branches efficiently. User/business predicates
+        # remain parameterized.
+        if snapshot_period_context is not None:
+            filter_table = (
+                planned_filter.table.table
+            )
+
+            filter_column = (
+                planned_filter
+                .resolved_column
+                .column
+            )
+
+            if (
+                filter_table.id
+                == snapshot_period_context["table"].id
+                and filter_column.id
+                == snapshot_period_context["column"].id
+                and len(parameters) >= 2
+            ):
+                snapshot_time_parameters = list(
+                    parameters
+                )
+
+                def _trusted_bound_literal(
+                    parameter,
+                ):
+                    value = getattr(
+                        parameter,
+                        "value",
+                        None,
+                    )
+
+                    data_type = str(
+                        getattr(
+                            parameter,
+                            "data_type",
+                            "",
+                        )
+                        or ""
+                    ).strip().lower()
+
+                    numeric_types = {
+                        "int",
+                        "integer",
+                        "number",
+                        "numeric",
+                        "decimal",
+                        "float",
+                        "double",
+                    }
+
+                    if data_type in numeric_types:
+                        return str(int(value))
+
+                    if isinstance(
+                        value,
+                        datetime,
+                    ):
+                        iso_value = (
+                            value.date()
+                            .isoformat()
+                        )
+                    elif isinstance(
+                        value,
+                        date,
+                    ):
+                        iso_value = (
+                            value.isoformat()
+                        )
+                    else:
+                        raw = str(value).strip()
+
+                        if (
+                            raw.isdigit()
+                            and len(raw) == 8
+                        ):
+                            return raw
+
+                        iso_value = raw
+
+                    if dialect in {
+                        "oracle",
+                        "postgresql",
+                    }:
+                        return (
+                            "DATE '"
+                            + iso_value
+                            + "'"
+                        )
+
+                    if dialect == "mssql":
+                        return (
+                            "CAST('"
+                            + iso_value
+                            + "' AS DATE)"
+                        )
+
+                    return (
+                        "'"
+                        + iso_value.replace(
+                            "'",
+                            "''",
+                        )
+                        + "'"
+                    )
+
+                for parameter in parameters:
+                    expression = expression.replace(
+                        ":" + parameter.name,
+                        _trusted_bound_literal(
+                            parameter
+                        ),
+                    )
+
+                is_snapshot_time_range = True
+
         where_clauses.append(
             expression
         )
 
-        compiled.parameters.extend(
-            parameters
+        if not is_snapshot_time_range:
+            compiled.parameters.extend(
+                parameters
+            )
+
+    # --------------------------------------------------
+    # Build bounded latest-snapshot lookups.
+    #
+    # Instead of scanning the full historical source and
+    # GROUP BY-ing every daily snapshot row, split the
+    # governed date range into requested periods and issue
+    # one bounded MAX(time_axis) lookup per period.
+    #
+    # This is generic and metadata-driven:
+    #   temporal_behavior = snapshot
+    #   period_selection   = latest_snapshot
+    #   time_grain         = day/week/month/quarter/year
+    # --------------------------------------------------
+
+    if snapshot_period_context is not None:
+        context = snapshot_period_context
+
+        if (
+            snapshot_time_parameters is not None
+            and len(snapshot_time_parameters) >= 2
+        ):
+            from datetime import (
+                date as _date,
+                datetime as _datetime,
+                timedelta as _timedelta,
+            )
+
+            def _to_date(value):
+                if isinstance(value, _datetime):
+                    return value.date()
+
+                if isinstance(value, _date):
+                    return value
+
+                if isinstance(value, (int, float)):
+                    raw = str(int(value))
+                else:
+                    raw = str(value).strip()
+
+                for fmt in (
+                    "%Y%m%d",
+                    "%Y-%m-%d",
+                    "%Y/%m/%d",
+                ):
+                    try:
+                        return _datetime.strptime(
+                            raw,
+                            fmt,
+                        ).date()
+                    except ValueError:
+                        pass
+
+                return None
+
+            def _from_date(value, template):
+                if isinstance(template, _datetime):
+                    return _datetime.combine(
+                        value,
+                        _datetime.min.time(),
+                    )
+
+                if isinstance(template, _date):
+                    return value
+
+                if isinstance(template, int):
+                    return int(
+                        value.strftime("%Y%m%d")
+                    )
+
+                if isinstance(template, float):
+                    return int(
+                        value.strftime("%Y%m%d")
+                    )
+
+                raw_template = str(
+                    template
+                ).strip()
+
+                if (
+                    raw_template.isdigit()
+                    and len(raw_template) == 8
+                ):
+                    return value.strftime(
+                        "%Y%m%d"
+                    )
+
+                if "-" in raw_template:
+                    return value.strftime(
+                        "%Y-%m-%d"
+                    )
+
+                if "/" in raw_template:
+                    return value.strftime(
+                        "%Y/%m/%d"
+                    )
+
+                return value.strftime(
+                    "%Y%m%d"
+                )
+
+            def _next_period_boundary(
+                value,
+                grain,
+            ):
+                normalized_grain = (
+                    str(grain or "")
+                    .strip()
+                    .lower()
+                )
+
+                if normalized_grain == "day":
+                    return value + _timedelta(
+                        days=1
+                    )
+
+                if normalized_grain == "week":
+                    return value + _timedelta(
+                        days=7
+                    )
+
+                if normalized_grain == "month":
+                    if value.month == 12:
+                        return _date(
+                            value.year + 1,
+                            1,
+                            1,
+                        )
+
+                    return _date(
+                        value.year,
+                        value.month + 1,
+                        1,
+                    )
+
+                if normalized_grain == "quarter":
+                    quarter_start_month = (
+                        ((value.month - 1) // 3)
+                        * 3
+                        + 1
+                    )
+
+                    next_month = (
+                        quarter_start_month
+                        + 3
+                    )
+
+                    next_year = value.year
+
+                    if next_month > 12:
+                        next_month -= 12
+                        next_year += 1
+
+                    return _date(
+                        next_year,
+                        next_month,
+                        1,
+                    )
+
+                if normalized_grain == "year":
+                    return _date(
+                        value.year + 1,
+                        1,
+                        1,
+                    )
+
+                return None
+
+            start_parameter = (
+                snapshot_time_parameters[0]
+            )
+
+            end_parameter = (
+                snapshot_time_parameters[1]
+            )
+
+            start_value = getattr(
+                start_parameter,
+                "value",
+                None,
+            )
+
+            end_value = getattr(
+                end_parameter,
+                "value",
+                None,
+            )
+
+            start_date = _to_date(
+                start_value
+            )
+
+            end_date = _to_date(
+                end_value
+            )
+
+            period_ranges = []
+
+            if (
+                start_date is not None
+                and end_date is not None
+                and start_date < end_date
+            ):
+                # Do not generate empty future periods for
+                # an open current-year/current-period range.
+                today = _date.today()
+
+                effective_end = end_date
+
+                if (
+                    start_date <= today
+                    and today < end_date
+                ):
+                    current_period_end = (
+                        _next_period_boundary(
+                            today,
+                            context[
+                                "time_grain"
+                            ],
+                        )
+                    )
+
+                    if current_period_end is not None:
+                        effective_end = min(
+                            end_date,
+                            current_period_end,
+                        )
+
+                cursor = start_date
+
+                while cursor < effective_end:
+                    next_boundary = (
+                        _next_period_boundary(
+                            cursor,
+                            context[
+                                "time_grain"
+                            ],
+                        )
+                    )
+
+                    if (
+                        next_boundary is None
+                        or next_boundary <= cursor
+                    ):
+                        break
+
+                    period_end = min(
+                        next_boundary,
+                        effective_end,
+                    )
+
+                    period_ranges.append(
+                        (
+                            cursor,
+                            period_end,
+                        )
+                    )
+
+                    cursor = period_end
+
+            if period_ranges:
+                lookup_queries = []
+
+                def _period_literal(
+                    value,
+                    template_parameter,
+                ):
+                    data_type = str(
+                        getattr(
+                            template_parameter,
+                            "data_type",
+                            "",
+                        )
+                        or ""
+                    ).strip().lower()
+
+                    numeric_types = {
+                        "int",
+                        "integer",
+                        "number",
+                        "numeric",
+                        "decimal",
+                        "float",
+                        "double",
+                    }
+
+                    if data_type in numeric_types:
+                        return str(
+                            int(value.strftime("%Y%m%d"))
+                        )
+
+                    iso_value = value.strftime(
+                        "%Y-%m-%d"
+                    )
+
+                    if dialect == "oracle":
+                        return (
+                            "DATE '"
+                            + iso_value
+                            + "'"
+                        )
+
+                    if dialect == "postgresql":
+                        return (
+                            "DATE '"
+                            + iso_value
+                            + "'"
+                        )
+
+                    if dialect == "mssql":
+                        return (
+                            "CAST('"
+                            + iso_value
+                            + "' AS DATE)"
+                        )
+
+                    return (
+                        "'"
+                        + iso_value
+                        + "'"
+                    )
+
+                for (
+                    period_start,
+                    period_end,
+                ) in period_ranges:
+                    start_literal = (
+                        _period_literal(
+                            period_start,
+                            start_parameter,
+                        )
+                    )
+
+                    end_literal = (
+                        _period_literal(
+                            period_end,
+                            end_parameter,
+                        )
+                    )
+
+                    lookup_queries.append(
+                        (
+                            "    SELECT MAX("
+                            + context[
+                                "cte_snapshot_reference"
+                            ]
+                            + ") AS snapshot_date\n"
+                            + "    FROM "
+                            + context[
+                                "historical_table_name"
+                            ]
+                            + " "
+                            + table_alias_clause(
+                                context[
+                                    "cte_source_alias"
+                                ],
+                                dialect,
+                            )
+                            + "\n"
+                            + "    WHERE "
+                            + context[
+                                "cte_snapshot_reference"
+                            ]
+                            + f" >= {start_literal}"
+                            + " AND "
+                            + context[
+                                "cte_snapshot_reference"
+                            ]
+                            + f" < {end_literal}"
+                        )
+                    )
+
+                snapshot_period_cte = (
+                    f"{context['cte_alias']} AS (\n"
+                    + "\n    UNION ALL\n".join(
+                        lookup_queries
+                    )
+                    + "\n)"
+                )
+
+        # Safe semantic fallback when no two-bound governed
+        # range was available. This preserves latest-snapshot
+        # correctness even though it may be slower.
+        if snapshot_period_cte is None:
+            snapshot_period_cte = (
+                f"{context['cte_alias']} AS (\n"
+                f"    SELECT\n"
+                f"        MAX("
+                f"{context['cte_snapshot_reference']}) "
+                f"AS snapshot_date\n"
+                f"    FROM "
+                f"{context['historical_table_name']} "
+                f"{table_alias_clause(context['cte_source_alias'], dialect)}\n"
+                f"    GROUP BY "
+                f"{context['cte_period_expression']}\n"
+                f")"
+            )
+
+        snapshot_period_join = (
+            f"INNER JOIN "
+            f"{context['cte_alias']} "
+            f"ON {context['snapshot_reference']} = "
+            f"{context['cte_alias']}.snapshot_date"
         )
 
     group_by_expressions = []
@@ -1552,10 +2517,15 @@ def compile_governed_plan(
         )
 
         group_by_expressions.append(
-            column_reference(
-                alias,
-                column.column_name,
-                dialect,
+            time_grain_expression(
+                alias=alias,
+                column=column,
+                dialect=dialect,
+                time_grain=getattr(
+                    grouping,
+                    "time_grain",
+                    None,
+                ),
             )
         )
 
@@ -1579,6 +2549,44 @@ def compile_governed_plan(
             column.column_name,
             dialect,
         )
+        
+        # If ORDER BY targets the same physical column
+        # used by a time-grained GROUP BY, order by
+        # the exact same grouped expression.
+        time_grouping = next(
+            (
+                grouping
+                for grouping in plan.group_by
+                if (
+                    grouping.table.table.id
+                    == table.id
+                    and grouping
+                    .resolved_column
+                    .column
+                    .id
+                    == column.id
+                    and getattr(
+                        grouping,
+                        "time_grain",
+                        None,
+                    )
+                    is not None
+                )
+            ),
+            None,
+        )
+
+        if time_grouping is not None:
+            reference = time_grain_expression(
+                alias=alias,
+                column=column,
+                dialect=dialect,
+                time_grain=getattr(
+                    time_grouping,
+                    "time_grain",
+                    None,
+                ),
+            )
 
         # If ORDER BY targets the same physical column
         # used by the aggregation, order by the aggregate
@@ -1705,20 +2713,83 @@ def compile_governed_plan(
             f"COUNT(*) "
             f"{count_direction}"
         )
+        # --------------------------------------------------
+    # Canonical ordering for time-series/grouped results
+    # --------------------------------------------------
 
-    sql_parts = [
-        "SELECT",
-        "    "
-        + ",\n    ".join(
-            selected_expressions
+    time_grouping = next(
+        (
+            grouping
+            for grouping in plan.group_by
+            if getattr(grouping, "time_grain", None)
+            is not None
         ),
-        "FROM",
-        f"    {from_clause}",
-    ]
+        None,
+    )
+
+    if time_grouping is not None:
+        time_table = time_grouping.table.table
+        time_column = (
+            time_grouping
+            .resolved_column
+            .column
+        )
+
+        time_alias = table_aliases[
+            time_table.id
+        ]
+
+        time_order_expression = (
+            time_grain_expression(
+                alias=time_alias,
+                column=time_column,
+                dialect=dialect,
+                time_grain=(
+                    time_grouping.time_grain
+                ),
+            )
+        )
+
+        order_by_expressions = [
+            (
+                f"{time_order_expression} ASC"
+                + (
+                    " NULLS LAST"
+                    if dialect == "oracle"
+                    else ""
+                )
+            )
+        ]
+    sql_parts = []
+
+    if snapshot_period_cte:
+        sql_parts.extend(
+            [
+                "WITH",
+                f"    {snapshot_period_cte}",
+            ]
+        )
+
+    sql_parts.extend(
+        [
+            "SELECT",
+            "    "
+            + ",\n    ".join(
+                selected_expressions
+            ),
+            "FROM",
+            f"    {from_clause}",
+        ]
+    )
 
     for join_clause in join_clauses:
         sql_parts.append(
             f"    {join_clause}"
+        )
+
+    if snapshot_period_join:
+        sql_parts.append(
+            f"    {snapshot_period_join}"
         )
 
     if where_clauses:
@@ -1813,10 +2884,14 @@ def compile_governed_plan(
                 ),
             ]
         )
+        
+    
 
     sql = "\n".join(
         sql_parts
     )
+
+    
 
     sql = compile_limit(
         sql=sql,
@@ -1825,6 +2900,15 @@ def compile_governed_plan(
     )
 
     compiled.sql = sql
+    
+    print("\n=== COMPILED SQL DEBUG ===")
+    print(compiled.sql)
+    print("PARAMETERS:")
+    print(compiled.parameters)
+    print("ERRORS:")
+    print(compiled.errors)
+    print("=== END COMPILED SQL DEBUG ===\n")
+
     compiled.is_compiled = True
 
     compiled.explanation.append(
@@ -1855,21 +2939,21 @@ def create_and_compile_sql(
     maximum_entities: int,
     maximum_path_depth: int,
     user_role: str,
+    branch_scope_value: str | None = None,
+    allow_confidential_aggregate: bool = False,
 ) -> CompiledSQL:
     plan = create_governed_query_plan(
         database=database,
         prompt=prompt,
         domain_id=domain_id,
-        requested_limit=(
-            requested_limit
-        ),
-        maximum_entities=(
-            maximum_entities
-        ),
-        maximum_path_depth=(
-            maximum_path_depth
-        ),
+        requested_limit=requested_limit,
+        maximum_entities=maximum_entities,
+        maximum_path_depth=maximum_path_depth,
         user_role=user_role,
+        branch_scope_value=branch_scope_value,
+        allow_confidential_aggregate=(
+            allow_confidential_aggregate
+        ),
     )
 
     return compile_governed_plan(
