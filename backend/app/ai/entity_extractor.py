@@ -51,6 +51,11 @@ TIME_PATTERNS = [
     r"\bthis week\b",
     r"\blast week\b",
     r"\bnext week\b",
+
+    r"\blast \d+ months?\b",
+    r"\bpast \d+ months?\b",
+    r"\bprevious \d+ months?\b",
+
     r"\bthis month\b",
     r"\blast month\b",
     r"\bnext month\b",

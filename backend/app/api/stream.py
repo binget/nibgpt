@@ -47,6 +47,22 @@ from app.ai.document_intelligence import (
     stream_document_question,
 )
 
+from app.core.auth_dependencies import (
+    get_current_user,
+)
+
+from app.models.user import (
+    User,
+)
+
+from app.services.authorization_service import (
+    resolve_authorization_requirement,
+)
+
+from app.services.rbac_service import (
+    authorize_request,
+)
+
 
 router = APIRouter(
     prefix="/api/orchestrator",
@@ -89,13 +105,17 @@ def load_conversation_history(
     database: Session,
     conversation_id: int | None,
     current_prompt: str,
+    current_user: User,
+    
 ) -> list[dict[str, str]]:
     if conversation_id is None:
         return []
 
-    conversation = database.get(
-        Conversation,
-        conversation_id,
+    conversation = database.scalar(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
+        )
     )
 
     if conversation is None:
@@ -195,7 +215,37 @@ def stream_nibgpt(
     database: Session = Depends(
         get_db
     ),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
+    route = (
+        "knowledge"
+        if payload.mode in (
+            "document",
+            "knowledge",
+        )
+        else "general"
+    )
+
+    authorization = (
+        resolve_authorization_requirement(
+            prompt=payload.prompt,
+            route=route,
+        )
+    )
+
+    authorize_request(
+        database=database,
+        user=current_user,
+        permission_code=(
+            authorization.permission_code
+        ),
+        resource=(
+            authorization.resource
+        ),
+        request_text=payload.prompt,
+    )
     history = (
         load_conversation_history(
             database=database,
@@ -214,7 +264,10 @@ def stream_nibgpt(
                 "start"
             )
 
-            if payload.mode == "document":
+            if payload.mode in (
+                "document",
+                "knowledge",
+            ):
 
                 token_stream = (
                     stream_document_question(
@@ -306,3 +359,4 @@ def stream_report_explanation_api(
                 "no",
         },
     )
+    

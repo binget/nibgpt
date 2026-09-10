@@ -11,7 +11,12 @@ from app.ai.entity_extractor import (
 )
 from app.ai.relationship_reasoning import (
     ResolvedColumn,
+    ResolvedTable,
     analyze_relationship_reasoning,
+)
+from app.models.metadata import (
+    MetadataColumn,
+    MetadataTable,
 )
 
 from app.models.business_rule import (
@@ -19,7 +24,7 @@ from app.models.business_rule import (
 )
 
 from sqlalchemy import select
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.business_join_mapping import (
     BusinessRelationshipJoinMapping,
@@ -184,12 +189,23 @@ class PlannedAggregation:
     alias: str
     confidence: int
 
+    temporal_behavior: str = "event"
+    period_selection: str = "all_rows"
+
+    time_axis_table: object | None = None
+    time_axis_column: object | None = None
+
+    time_axis_column_id: int | None = None
+    historical_source_table_id: int | None = None
+    historical_value_column_id: int | None = None
+
 
 @dataclass
 class PlannedGrouping:
     table: object
     resolved_column: object
     confidence: int
+    time_grain: str | None = None
 
 
 @dataclass
@@ -318,6 +334,54 @@ def is_date_type(
         for term in DATE_TYPES
     )
 
+def is_semantic_date_column(
+    column: object,
+) -> bool:
+    """
+    Returns True when a column should behave as a date
+    for semantic analytics.
+
+    This supports legacy/core-banking schemas where dates
+    may physically be stored as NUMBER or VARCHAR while
+    their governed metadata clearly identifies them as dates.
+    """
+
+    if is_date_type(
+        column.data_type
+    ):
+        return True
+
+    semantic_text = normalize_text(
+        " ".join(
+            filter(
+                None,
+                [
+                    column.column_name,
+                    column.business_name,
+                    column.description,
+                ],
+            )
+        )
+    )
+
+    date_terms = {
+        "date",
+        "opening date",
+        "open date",
+        "transaction date",
+        "maturity date",
+        "expiry date",
+        "expiration date",
+        "created date",
+        "registration date",
+        "value date",
+        "posting date",
+    }
+
+    return any(
+        term in semantic_text
+        for term in date_terms
+    )
 
 def column_search_text(
     resolved_column: object,
@@ -429,8 +493,8 @@ def find_best_column(
 
             if (
                 require_date
-                and not is_date_type(
-                    column.data_type
+                and not is_semantic_date_column(
+                    column
                 )
             ):
                 continue
@@ -645,10 +709,16 @@ def detect_requested_limit(
     # --------------------------------------------------
 
     match = re.search(
-        r"\b(?:top|bottom|first|last)"
-        r"\s+(\d+)\b",
+        r"\b(?:top|bottom|first)\s+(\d+)\b",
         normalized,
     )
+
+    if match is None:
+        match = re.search(
+            r"\blast\s+(\d+)\s+"
+            r"(?:records?|rows?|results?|items?|customers?|accounts?|branches?)\b",
+            normalized,
+        )
 
     if match:
         prompt_limit = int(
@@ -672,6 +742,16 @@ def detect_requested_limit(
 def determine_time_operator(
     time_expression: str,
 ) -> str | None:
+    normalized = normalize_text(
+        time_expression
+    )
+
+    if re.fullmatch(
+        r"(?:last|past|previous)\s+\d+\s+months?",
+        normalized,
+    ):
+        return "rolling_months"
+
     mapping = {
         "today": "this_day",
         "this week": "this_week",
@@ -688,9 +768,7 @@ def determine_time_operator(
     }
 
     return mapping.get(
-        normalize_text(
-            time_expression
-        )
+        normalized
     )
 
 
@@ -698,12 +776,24 @@ def build_time_filters(
     prompt: str,
     physical_tables: list[object],
     time_expressions: list[str],
+    aggregation: PlannedAggregation | None = None,
 ) -> list[PlannedFilter]:
     filters: list[PlannedFilter] = []
 
     normalized_prompt = normalize_text(prompt)
 
-    if "completed" in normalized_prompt:
+    if (
+        "opened" in normalized_prompt
+        or "opening" in normalized_prompt
+    ):
+        context_date_terms = [
+            "opening date",
+            "open date",
+            "account opening date",
+            "date opened",
+        ]
+
+    elif "completed" in normalized_prompt:
         context_date_terms = [
             "date completed",
             "completed date",
@@ -758,36 +848,105 @@ def build_time_filters(
         operator = determine_time_operator(
             expression
         )
+        
+        filter_value = None
+
+        if operator == "rolling_months":
+            rolling_match = re.search(
+                r"\b(\d+)\s+months?\b",
+                normalize_text(expression),
+            )
+
+            if rolling_match is None:
+                continue
+
+            filter_value = int(
+                rolling_match.group(1)
+            )
+
+            if (
+                filter_value < 1
+                or filter_value > 120
+            ):
+                continue
 
         if operator is None:
             continue
 
-        match = find_best_column(
-            physical_tables=physical_tables,
-            terms=context_date_terms,
-            require_date=True,
-        )
+                # --------------------------------------------------
+        # Governed temporal axis
+        #
+        # If the selected measure declares its own
+        # time axis, reuse it for the time predicate.
+        #
+        # This guarantees that:
+        #
+        #   measure
+        #   grouping
+        #   time filter
+        #
+        # all operate on the same physical timeline.
+        # --------------------------------------------------
 
-        if match is None:
-            continue
+        if (
+            aggregation is not None
+            and getattr(
+                aggregation,
+                "time_axis_table",
+                None,
+            )
+            is not None
+            and getattr(
+                aggregation,
+                "time_axis_column",
+                None,
+            )
+            is not None
+        ):
+            resolved_table = (
+                aggregation.time_axis_table
+            )
 
-        (
-            resolved_table,
-            resolved_column,
-        ) = match
+            resolved_column = (
+                aggregation.time_axis_column
+            )
+
+            time_reason = (
+                f"Time expression '{expression}' "
+                f"was mapped to governed measure "
+                f"time axis "
+                f"{resolved_column.column.column_name}."
+            )
+
+        else:
+            match = find_best_column(
+                physical_tables=physical_tables,
+                terms=context_date_terms,
+                require_date=True,
+            )
+
+            if match is None:
+                continue
+
+            (
+                resolved_table,
+                resolved_column,
+            ) = match
+
+            time_reason = (
+                f"Time expression '{expression}' "
+                f"was mapped to contextual date column "
+                f"{resolved_column.column.column_name}."
+            )
 
         filters.append(
             PlannedFilter(
                 table=resolved_table,
                 resolved_column=resolved_column,
                 operator=operator,
-                value=None,
+                value=filter_value,
                 confidence=92,
-                reason=(
-                    f"Time expression '{expression}' "
-                    f"was mapped to contextual date column "
-                    f"{resolved_column.column.column_name}."
-                ),
+                reason=time_reason,
             )
         )
 
@@ -1222,76 +1381,121 @@ def build_attribute_filters(
             ):
                 continue
 
+            # --------------------------------------------------
+            # Resolve the governed rule column.
+            #
+            # Prefer the exact metadata column configured on
+            # the BusinessRule.
+            #
+            # When the measure has been rebound to an approved
+            # historical/snapshot table, the equivalent physical
+            # column has a different metadata ID. In that case,
+            # resolve it by the governed source column's semantic
+            # identity/name.
+            # --------------------------------------------------
+
+            rule_source_column = None
+
+            if rule.metadata_column_id is not None:
+                rule_source_column = database.get(
+                    MetadataColumn,
+                    rule.metadata_column_id,
+                )
+
+            matched_column = None
+
             for column in (
                 resolved_table.table.columns
             ):
+                # Exact configured metadata column.
                 if (
-                    column.id
-                    != rule.metadata_column_id
+                    rule.metadata_column_id is not None
+                    and column.id
+                    == rule.metadata_column_id
                 ):
-                    continue
+                    matched_column = column
+                    break
 
+                # Equivalent governed column on a rebound
+                # historical physical source.
                 if (
-                    not column.is_discovered
-                    or not column.is_enabled
-                    or not column.ai_access_allowed
+                    rule_source_column is not None
+                    and normalize_text(
+                        column.column_name
+                    )
+                    == normalize_text(
+                        rule_source_column.column_name
+                    )
                 ):
-                    continue
+                    matched_column = column
+                    break
 
-                matched_term = (
-                    trigger
-                    if trigger
-                    else rule.name
+            if matched_column is None:
+                continue
+
+            column = matched_column
+
+            if (
+                not column.is_discovered
+                or not column.is_enabled
+                or not column.ai_access_allowed
+            ):
+                continue
+
+            matched_term = (
+                trigger
+                if trigger
+                else rule.name
+            )
+
+            resolved_column = (
+                ResolvedColumn(
+                    column=column,
+                    confidence=(
+                        rule.confidence
+                    ),
+                    matched_terms=[
+                        matched_term
+                    ],
                 )
+            )
 
-                resolved_column = (
-                    ResolvedColumn(
-                        column=column,
-                        confidence=(
-                            rule.confidence
-                        ),
-                        matched_terms=[
-                            matched_term
-                        ],
-                    )
+            filters.append(
+                PlannedFilter(
+                    table=resolved_table,
+                    resolved_column=(
+                        resolved_column
+                    ),
+                    operator=(
+                        rule.operator
+                    ),
+                    value=(
+                        rule.rule_value
+                    ),
+                    confidence=(
+                        rule.confidence
+                    ),
+                    reason=(
+                        "Metadata-driven "
+                        "business rule: "
+                        f"{rule.name} → "
+                        f"{resolved_table.entity.name}."
+                        f"{column.column_name} "
+                        f"{rule.operator} "
+                        f"'{rule.rule_value}'."
+                    ),
                 )
+            )
 
-                filters.append(
-                    PlannedFilter(
-                        table=resolved_table,
-                        resolved_column=(
-                            resolved_column
-                        ),
-                        operator=(
-                            rule.operator
-                        ),
-                        value=(
-                            rule.rule_value
-                        ),
-                        confidence=(
-                            rule.confidence
-                        ),
-                        reason=(
-                            "Metadata-driven "
-                            "business rule: "
-                            f"{rule.name} → "
-                            f"{resolved_table.entity.name}."
-                            f"{column.column_name} "
-                            f"{rule.operator} "
-                            f"'{rule.rule_value}'."
-                        ),
-                    )
-                )
+            matched_rule_ids.add(
+                rule.id
+            )
 
-                matched_rule_ids.add(
-                    rule.id
-                )
+            rule_applied = True
+            break
 
-                rule_applied = True
-                break
-
-            if rule_applied:
-                break
+        if rule_applied:
+            break
 
     # --------------------------------------------------
     # 3. Deposit Balance special calculation rule
@@ -1315,16 +1519,6 @@ def build_attribute_filters(
 
     if deposit_balance_prompt:
         for resolved_table in physical_tables:
-            table_name = (
-                resolved_table
-                .table
-                .table_name
-                .strip()
-                .lower()
-            )
-
-            if table_name != "fbnk_account":
-                continue
 
             category_column = None
             working_balance_column = None
@@ -1658,17 +1852,294 @@ def resolve_semantic_measure(
         return PlannedAggregation(
             function=function,
             table=resolved_table,
-            resolved_column=(
-                resolved_column
-            ),
+            resolved_column=resolved_column,
             alias=measure_alias,
-            confidence=(
-                best_measure.confidence
+            confidence=best_measure.confidence,
+
+            temporal_behavior=(
+                best_measure.temporal_behavior
+                or "event"
+            ),
+
+            period_selection=(
+                best_measure.period_selection
+                or "all_rows"
+            ),
+
+            time_axis_column_id=(
+                best_measure.time_axis_column_id
+            ),
+
+            historical_source_table_id=(
+                best_measure.historical_source_table_id
+            ),
+
+            historical_value_column_id=(
+                best_measure.historical_value_column_id
             ),
         )
 
     return None
 
+def requires_historical_measure_source(
+    prompt: str,
+) -> bool:
+    normalized = normalize_text(prompt)
+
+    # Explicit time-grained analytics:
+    # monthly, weekly, quarterly, yearly, etc.
+    if detect_time_grain(prompt) is not None:
+        return True
+
+    historical_patterns = [
+        r"\blast \d+ months?\b",
+        r"\bpast \d+ months?\b",
+        r"\bprevious \d+ months?\b",
+        r"\blast month\b",
+        r"\bprevious month\b",
+        r"\bthis month\b",
+        r"\bthis year\b",
+        r"\blast year\b",
+        r"\bprevious year\b",
+        r"\bover time\b",
+        r"\bhistorical\b",
+        r"\bhistory\b",
+        r"\btrend\b",
+    ]
+
+    return any(
+        re.search(pattern, normalized)
+        for pattern in historical_patterns
+    )
+    
+def prepare_temporal_measure_source(
+    database: Session,
+    prompt: str,
+    physical_tables: list[object],
+    aggregation: PlannedAggregation | None,
+) -> tuple[
+    list[object],
+    PlannedAggregation | None,
+    bool,
+]:
+    if aggregation is None:
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    if (
+        normalize_text(
+            aggregation.temporal_behavior
+        )
+        != "snapshot"
+    ):
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    if not requires_historical_measure_source(
+        prompt
+    ):
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    historical_table_id = (
+        aggregation
+        .historical_source_table_id
+    )
+
+    historical_value_column_id = (
+        aggregation
+        .historical_value_column_id
+    )
+
+    time_axis_column_id = (
+        aggregation
+        .time_axis_column_id
+    )
+
+    if (
+        historical_table_id is None
+        or historical_value_column_id is None
+        or time_axis_column_id is None
+    ):
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    statement = (
+        select(MetadataTable)
+        .options(
+            selectinload(
+                MetadataTable.columns
+            )
+        )
+        .where(
+            MetadataTable.id
+            == historical_table_id
+        )
+    )
+
+    historical_table = database.scalar(
+        statement
+    )
+
+    if historical_table is None:
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    if (
+        not historical_table.is_discovered
+        or not historical_table.is_enabled
+        or not historical_table.ai_access_allowed
+    ):
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    historical_value_column = None
+    time_axis_column = None
+
+    resolved_columns = []
+
+    for column in historical_table.columns:
+        if (
+            not column.is_discovered
+            or not column.is_enabled
+            or not column.ai_access_allowed
+        ):
+            continue
+
+        if (
+            column.id
+            == historical_value_column_id
+        ):
+            historical_value_column = column
+
+        if (
+            column.id
+            == time_axis_column_id
+        ):
+            time_axis_column = column
+
+        resolved_columns.append(
+            ResolvedColumn(
+                column=column,
+                confidence=aggregation.confidence,
+                matched_terms=[],
+            )
+        )
+
+    if (
+        historical_value_column is None
+        or time_axis_column is None
+    ):
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    if aggregation.table is None:
+        return (
+            physical_tables,
+            aggregation,
+            False,
+        )
+
+    original_table_id = (
+        aggregation.table.table.id
+    )
+
+    historical_resolved_table = (
+        ResolvedTable(
+            table=historical_table,
+            entity=aggregation.table.entity,
+            mapping_type=(
+                "measure_historical_source"
+            ),
+            mapping_confidence=(
+                aggregation.confidence
+            ),
+            columns=resolved_columns,
+        )
+    )
+
+    historical_value_resolved = (
+        ResolvedColumn(
+            column=historical_value_column,
+            confidence=aggregation.confidence,
+            matched_terms=[
+                aggregation.alias
+            ],
+        )
+    )
+
+    time_axis_resolved = (
+        ResolvedColumn(
+            column=time_axis_column,
+            confidence=aggregation.confidence,
+            matched_terms=[
+                "time axis"
+            ],
+        )
+    )
+
+    # Replace the current-state table used by the
+    # measure. Keep unrelated resolved tables such as
+    # branch/district lookup tables.
+    updated_physical_tables = [
+        item
+        for item in physical_tables
+        if item.table.id
+        != original_table_id
+    ]
+
+    if not any(
+        item.table.id
+        == historical_table.id
+        for item in updated_physical_tables
+    ):
+        updated_physical_tables.append(
+            historical_resolved_table
+        )
+
+    aggregation.table = (
+        historical_resolved_table
+    )
+
+    aggregation.resolved_column = (
+        historical_value_resolved
+    )
+
+    aggregation.time_axis_table = (
+        historical_resolved_table
+    )
+
+    aggregation.time_axis_column = (
+        time_axis_resolved
+    )
+
+    return (
+        updated_physical_tables,
+        aggregation,
+        True,
+    )
+    
 def resolve_semantic_measures(
     database: Session,
     prompt: str,
@@ -2678,6 +3149,72 @@ def resolve_semantic_dimensions(
 
     return matched_groupings
 
+def detect_time_grain(
+    prompt: str,
+) -> str | None:
+    normalized = normalize_text(
+        prompt
+    )
+
+    grain_patterns = [
+        (
+            "day",
+            [
+                r"\bdaily\b",
+                r"\bday by day\b",
+                r"\bby day\b",
+                r"\bper day\b",
+            ],
+        ),
+        (
+            "week",
+            [
+                r"\bweekly\b",
+                r"\bweek by week\b",
+                r"\bby week\b",
+                r"\bper week\b",
+            ],
+        ),
+        (
+            "month",
+            [
+                r"\bmonthly\b",
+                r"\bmonth by month\b",
+                r"\bby month\b",
+                r"\bper month\b",
+            ],
+        ),
+        (
+            "quarter",
+            [
+                r"\bquarterly\b",
+                r"\bquarter by quarter\b",
+                r"\bby quarter\b",
+                r"\bper quarter\b",
+            ],
+        ),
+        (
+            "year",
+            [
+                r"\byearly\b",
+                r"\bannually\b",
+                r"\byear by year\b",
+                r"\bby year\b",
+                r"\bper year\b",
+            ],
+        ),
+    ]
+
+    for grain, patterns in grain_patterns:
+        for pattern in patterns:
+            if re.search(
+                pattern,
+                normalized,
+            ):
+                return grain
+
+    return None
+
 def build_group_by(
     database: Session,
     prompt: str,
@@ -2694,6 +3231,132 @@ def build_group_by(
 
     if aggregation is None:
         return []
+    
+        # --------------------------------------------------
+    # Time-grained analytical grouping
+    #
+    # Examples:
+    #
+    # monthly account-opening trend
+    # deposits month by month
+    # weekly transaction trend
+    # yearly customer growth
+    #
+    # Resolve the physical date column semantically.
+    # SQL-specific date transformation is handled
+    # later by the compiler.
+    # --------------------------------------------------
+
+    time_grain = detect_time_grain(
+        prompt
+    )
+
+    if time_grain is not None:
+
+        # --------------------------------------------------
+        # Snapshot / governed temporal measures
+        #
+        # If the selected measure already declares its
+        # semantic time axis, always use that axis.
+        #
+        # Example:
+        #
+        # Deposit Balance historical trend
+        #     -> ACCOUNTBALANCE.PROCDATE
+        #
+        # This must happen BEFORE generic date-column
+        # discovery so another date column cannot be
+        # selected accidentally.
+        # --------------------------------------------------
+
+        if (
+            getattr(
+                aggregation,
+                "time_axis_table",
+                None,
+            )
+            is not None
+            and getattr(
+                aggregation,
+                "time_axis_column",
+                None,
+            )
+            is not None
+        ):
+            return [
+                PlannedGrouping(
+                    table=(
+                        aggregation
+                        .time_axis_table
+                    ),
+                    resolved_column=(
+                        aggregation
+                        .time_axis_column
+                    ),
+                    confidence=(
+                        aggregation.confidence
+                    ),
+                    time_grain=(
+                        time_grain
+                    ),
+                )
+            ]
+
+        # --------------------------------------------------
+        # Generic event-date resolution
+        #
+        # Used when the measure does not declare its own
+        # governed temporal axis.
+        #
+        # Example:
+        #
+        # monthly account-opening trend
+        #     -> OPENINGDATE
+        # --------------------------------------------------
+
+        if (
+            "opened" in normalized
+            or "opening" in normalized
+        ):
+            date_terms = [
+                "opening date",
+                "account opening date",
+                "date opened",
+                "open date",
+            ]
+        else:
+            date_terms = [
+                "date",
+                "period",
+                "transaction date",
+                "created date",
+                "posting date",
+            ]
+
+        time_match = find_best_column(
+            physical_tables=(
+                physical_tables
+            ),
+            terms=date_terms,
+            require_date=True,
+        )
+
+        if time_match is not None:
+            (
+                resolved_table,
+                resolved_column,
+            ) = time_match
+
+            return [
+                PlannedGrouping(
+                    table=resolved_table,
+                    resolved_column=(
+                        resolved_column
+                    ),
+                    confidence=96,
+                    time_grain=time_grain,
+                )
+            ]
 
     # --------------------------------------------------
     # 1. Governed semantic dimension catalog
@@ -2714,18 +3377,60 @@ def build_group_by(
     # If the catalog resolves a dimension, use it.
     # --------------------------------------------------
 
-    semantic_groupings = (
-        resolve_semantic_dimensions(
-            database=database,
-            prompt=prompt,
-            physical_tables=(
-                physical_tables
-            ),
+    # --------------------------------------------------
+    # A semantic dimension should become GROUP BY only
+    # when the user actually requests grouped output.
+    #
+    # Mentioning a dimension for filtering/context must
+    # not automatically create a grouping.
+    #
+    # Examples:
+    #
+    # "How many accounts were opened last month?"
+    #     -> no grouping
+    #
+    # "Show accounts by opening date"
+    #     -> grouping
+    #
+    # "Deposits per currency"
+    #     -> grouping
+    #
+    # "Each branch account count"
+    #     -> grouping
+    # --------------------------------------------------
+
+    has_explicit_grouping_signal = bool(
+        re.search(
+            r"\b("
+            r"by|"
+            r"per|"
+            r"each|"
+            r"grouped\s+by|"
+            r"group\s+by|"
+            r"breakdown\s+by|"
+            r"broken\s+down\s+by"
+            r")\b",
+            normalized,
+        )
+        or re.search(
+            r"\b[a-z0-9_ -]+\s+wise\b",
+            normalized,
         )
     )
 
-    if semantic_groupings:
-        return semantic_groupings
+    if has_explicit_grouping_signal:
+        semantic_groupings = (
+            resolve_semantic_dimensions(
+                database=database,
+                prompt=prompt,
+                physical_tables=(
+                    physical_tables
+                ),
+            )
+        )
+
+        if semantic_groupings:
+            return semantic_groupings
 
     # --------------------------------------------------
     # 2. Existing grouping logic remains as fallback.
@@ -3573,6 +4278,7 @@ def build_ordering(
 def evaluate_classifications(
     plan: GovernedPlan,
     user_role: str,
+    allow_confidential_aggregate: bool = False,
 ) -> None:
     allowed = (
         ROLE_ALLOWED_CLASSIFICATIONS.get(
@@ -3586,18 +4292,28 @@ def evaluate_classifications(
 
     blocked_entities = []
 
+    is_safe_aggregate = (
+        allow_confidential_aggregate
+        and plan.aggregation is not None
+    )
+
     for entity_match in plan.reasoning_result[
         "matched_entities"
     ]:
         entity = entity_match.entity
 
+        if entity.classification in allowed:
+            continue
+
         if (
-            entity.classification
-            not in allowed
+            entity.classification == "confidential"
+            and is_safe_aggregate
         ):
-            blocked_entities.append(
-                entity.name
-            )
+            continue
+
+        blocked_entities.append(
+            entity.name
+        )
 
     passed = not blocked_entities
 
@@ -3976,6 +4692,232 @@ def build_expiry_filters(
             ),
         )
     ]
+    
+def extract_requested_branch_scope(
+    prompt: str,
+) -> str | None:
+    """
+    Extract an explicitly requested branch identifier.
+
+    Examples:
+        "for branch 002"       -> "002"
+        "branch 002 deposits"  -> "002"
+        "at branch 001"        -> "001"
+
+    Grouping requests such as:
+        "by branch"
+        "by branches"
+
+    do not represent an explicit branch scope.
+    """
+
+    normalized = normalize_text(
+        prompt
+    )
+
+    # "by branch" is a grouping request,
+    # not a request for one branch.
+    if re.search(
+        r"\bby\s+branches?\b",
+        normalized,
+    ):
+        return None
+
+    patterns = [
+        r"\bfor\s+branch\s+([a-z0-9_-]+)\b",
+        r"\bat\s+branch\s+([a-z0-9_-]+)\b",
+        r"\bbranch\s+(?:code\s+)?([a-z0-9_-]+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            normalized,
+        )
+
+        if match:
+            return (
+                match.group(1)
+                .strip()
+            )
+
+    return None
+    
+def apply_branch_scope_filter(
+    plan: GovernedPlan,
+    physical_tables: list,
+    branch_scope_value: str | None,
+    requested_branch_value: str | None = None,
+) -> None:
+    if not branch_scope_value:
+        return
+
+    match = find_best_column(
+        physical_tables=physical_tables,
+        terms=[
+            "branch code",
+            "branch id",
+            "branch",
+        ],
+    )
+
+    if match is None:
+        plan.is_allowed = False
+        plan.decision = "blocked"
+
+        plan.governance_checks.append(
+            GovernanceCheck(
+                rule_code="DATA_SCOPE_001",
+                passed=False,
+                severity="critical",
+                message=(
+                    "Branch scope could not be enforced "
+                    "because no branch column was resolved."
+                ),
+            )
+        )
+
+        return
+
+    (
+        resolved_table,
+        resolved_column,
+    ) = match
+
+    scope_value = str(
+        branch_scope_value
+    ).strip()
+    
+    if requested_branch_value is not None:
+        requested_value = str(
+            requested_branch_value
+        ).strip()
+
+        if requested_value != scope_value:
+            plan.is_allowed = False
+            plan.decision = "blocked"
+
+            plan.governance_checks.append(
+                GovernanceCheck(
+                    rule_code="DATA_SCOPE_002",
+                    passed=False,
+                    severity="critical",
+                    message=(
+                        "Requested branch is outside "
+                        "the authenticated user's "
+                        "authorized data scope."
+                    ),
+                )
+            )
+
+            plan.blocked_reasons.append(
+                    "Access denied. The requested branch is outside "
+                    "your authorized data scope."
+                )
+
+            return
+
+    # --------------------------------------------------
+    # Check existing filters on the same branch column.
+    #
+    # If the request already contains:
+    #
+    #     branch = 002
+    #
+    # while authenticated scope is:
+    #
+    #     branch = 001
+    #
+    # block the plan rather than executing:
+    #
+    #     branch = 002 AND branch = 001
+    # --------------------------------------------------
+
+    for existing_filter in plan.filters:
+        same_table = (
+            existing_filter.table.table.id
+            == resolved_table.table.id
+        )
+
+        same_column = (
+            existing_filter
+            .resolved_column
+            .column.id
+            == resolved_column.column.id
+        )
+
+        if not (
+            same_table
+            and same_column
+        ):
+            continue
+
+        if existing_filter.operator != "=":
+            continue
+
+        requested_value = str(
+            existing_filter.value
+        ).strip()
+
+        if requested_value == scope_value:
+            # The user's requested branch already matches
+            # the authenticated server-side branch scope.
+            return
+
+        # Explicit conflicting branch filter.
+        plan.is_allowed = False
+        plan.decision = "blocked"
+
+        plan.governance_checks.append(
+            GovernanceCheck(
+                rule_code="DATA_SCOPE_002",
+                passed=False,
+                severity="critical",
+                message=(
+                    "Requested branch is outside "
+                    "the authenticated user's "
+                    "authorized data scope."
+                ),
+            )
+        )
+
+        plan.errors.append(
+            "Requested branch is outside the "
+            "authorized data scope."
+        )
+
+        return
+
+    # --------------------------------------------------
+    # No explicit matching/conflicting branch filter.
+    # Inject mandatory authenticated scope.
+    # --------------------------------------------------
+
+    plan.filters.append(
+        PlannedFilter(
+            table=resolved_table,
+            resolved_column=resolved_column,
+            operator="=",
+            value=scope_value,
+            confidence=100,
+            reason=(
+                "Mandatory authenticated user "
+                f"branch scope: {scope_value}"
+            ),
+        )
+    )
+
+    plan.governance_checks.append(
+        GovernanceCheck(
+            rule_code="DATA_SCOPE_001",
+            passed=True,
+            severity="critical",
+            message=(
+                "Mandatory branch data scope "
+                f"'{scope_value}' was enforced."
+            ),
+        )
+    )
 
 def create_governed_query_plan(
     database: Session,
@@ -3985,6 +4927,8 @@ def create_governed_query_plan(
     maximum_entities: int,
     maximum_path_depth: int,
     user_role: str,
+    branch_scope_value: str | None = None,
+    allow_confidential_aggregate: bool = False,
 ) -> GovernedPlan:
     reasoning_result = (
         analyze_relationship_reasoning(
@@ -4093,6 +5037,56 @@ def create_governed_query_plan(
         )
 
         return plan
+    
+        # --------------------------------------------------
+    # Temporal measure source preparation
+    #
+    # Snapshot measures may use a different governed
+    # historical source for time-series analysis.
+    #
+    # This must happen BEFORE:
+    #
+    # - time filters
+    # - branch/data scope
+    # - aggregation
+    # - grouping
+    #
+    # so all subsequent planning uses one consistent
+    # physical source and time axis.
+    # --------------------------------------------------
+
+    temporal_aggregation = (
+        resolve_semantic_measure(
+            database=database,
+            prompt=prompt,
+            physical_tables=(
+                physical_tables
+            ),
+        )
+    )
+
+    temporal_source_switched = False
+
+    if temporal_aggregation is not None:
+        (
+            physical_tables,
+            temporal_aggregation,
+            temporal_source_switched,
+        ) = prepare_temporal_measure_source(
+            database=database,
+            prompt=prompt,
+            physical_tables=(
+                physical_tables
+            ),
+            aggregation=(
+                temporal_aggregation
+            ),
+        )
+
+    if temporal_source_switched:
+        reasoning_result[
+            "physical_tables"
+        ] = physical_tables
 
     # --------------------------------------------------
     # Display columns
@@ -4116,6 +5110,11 @@ def create_governed_query_plan(
                 extraction_result[
                     "time_expressions"
                 ]
+            ),
+            aggregation=(
+                temporal_aggregation
+                if temporal_source_switched
+                else None
             ),
         )
     )
@@ -4146,35 +5145,55 @@ def create_governed_query_plan(
             physical_tables=physical_tables,
         )
     )
+    
+    requested_branch_value = (
+        extract_requested_branch_scope(
+            prompt
+        )
+    )
+    
+    apply_branch_scope_filter(
+        plan=plan,
+        physical_tables=physical_tables,
+        branch_scope_value=branch_scope_value,
+        requested_branch_value=(
+            requested_branch_value
+        ),
+    )
 
     # --------------------------------------------------
     # Aggregation
     # --------------------------------------------------
 
-    plan.aggregation = (
-    build_aggregation(
-        database=database,
-        prompt=prompt,
-        intent=(
-            reasoning_result[
-                "intent"
-            ]
-        ),
-        aggregation_terms=(
-            extraction_result[
-                "aggregation_terms"
-            ]
-        ),
-        physical_tables=(
-            physical_tables
-        ),
-        prompt_terms=(
-            extraction_result[
-                "keywords"
-            ]
-        ),
-    )
-)
+    if temporal_source_switched:
+        plan.aggregation = (
+            temporal_aggregation
+        )
+    else:
+        plan.aggregation = (
+            build_aggregation(
+                database=database,
+                prompt=prompt,
+                intent=(
+                    reasoning_result[
+                        "intent"
+                    ]
+                ),
+                aggregation_terms=(
+                    extraction_result[
+                        "aggregation_terms"
+                    ]
+                ),
+                physical_tables=(
+                    physical_tables
+                ),
+                prompt_terms=(
+                    extraction_result[
+                        "keywords"
+                    ]
+                ),
+            )
+        )
 
         # --------------------------------------------------
     # Multi-measure semantic resolution
@@ -4562,6 +5581,9 @@ def create_governed_query_plan(
     evaluate_classifications(
         plan=plan,
         user_role=user_role,
+        allow_confidential_aggregate=(
+            allow_confidential_aggregate
+        ),
     )
 
     evaluate_sensitive_columns(
@@ -4716,5 +5738,108 @@ def create_governed_query_plan(
 
     plan.decision = "approved"
     plan.is_allowed = True
+    
+    print("\n=== TEMPORAL DEBUG ===")
+
+    if plan.aggregation is not None:
+        print(
+            "aggregation:",
+            plan.aggregation.alias
+        )
+
+        print(
+            "aggregation table:",
+            plan.aggregation.table.table.table_name
+            if plan.aggregation.table
+            else None
+        )
+
+        print(
+            "aggregation column:",
+            plan.aggregation.resolved_column.column.column_name
+            if plan.aggregation.resolved_column
+            else None
+        )
+
+        print(
+            "temporal_behavior:",
+            getattr(
+                plan.aggregation,
+                "temporal_behavior",
+                None,
+            )
+        )
+
+        print(
+            "period_selection:",
+            getattr(
+                plan.aggregation,
+                "period_selection",
+                None,
+            )
+        )
+
+        print(
+            "time axis table:",
+            (
+                plan.aggregation
+                .time_axis_table
+                .table
+                .table_name
+            )
+            if getattr(
+                plan.aggregation,
+                "time_axis_table",
+                None,
+            )
+            else None
+        )
+
+        print(
+            "time axis column:",
+            (
+                plan.aggregation
+                .time_axis_column
+                .column
+                .column_name
+            )
+            if getattr(
+                plan.aggregation,
+                "time_axis_column",
+                None,
+            )
+            else None
+        )
+
+    print(
+        "filters:",
+        [
+            (
+                item.table.table.table_name,
+                item.resolved_column.column.column_name,
+                item.operator,
+                item.value,
+            )
+            for item in plan.filters
+        ]
+    )
+
+    print(
+        "group by:",
+        [
+            (
+                item.table.table.table_name,
+                item.resolved_column.column.column_name,
+                getattr(
+                    item,
+                    "time_grain",
+                    None,
+                ),
+            )
+            for item in plan.group_by
+        ]
+    )
+
+    print("=== END TEMPORAL DEBUG ===\n")
 
     return plan

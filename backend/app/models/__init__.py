@@ -41,7 +41,18 @@ from app.models.document_chunk import (
     DocumentChunk,
 )
 
+from app.models.rbac import (
+    Role,
+    Permission,
+    UserRole,
+    RolePermission,
+    UserDataScope,
+    AuditLog,
+)
 
+from app.models.semantic_time_series import (
+    SemanticTimeSeries,
+)
 
 __all__ = [
     "User",
@@ -61,4 +72,12 @@ __all__ = [
     "BusinessDimension",
     "DocumentIndex",
     "DocumentChunk",
+    "Role",
+    "Permission",
+    "UserRole",
+    "RolePermission",
+    "UserDataScope",
+    "AuditLog",
+    "SemanticTimeSeries",
 ]
+

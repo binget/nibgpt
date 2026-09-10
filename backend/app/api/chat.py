@@ -29,6 +29,9 @@ from app.schemas.chat import (
     ConversationSummaryResponse,
 )
 
+from app.core.auth_dependencies import get_current_user
+from app.models.user import User
+
 
 router = APIRouter(
     prefix="/api/chat",
@@ -97,22 +100,22 @@ def create_title(
 def get_or_404(
     database: Session,
     conversation_id: int,
+    current_user: User,
 ) -> Conversation:
-    conversation = (
-        database.get(
-            Conversation,
-            conversation_id,
+    statement = (
+        select(Conversation)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
         )
     )
 
+    conversation = database.scalar(statement)
+
     if conversation is None:
         raise HTTPException(
-            status_code=(
-                status.HTTP_404_NOT_FOUND
-            ),
-            detail=(
-                "Conversation not found"
-            ),
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
         )
 
     return conversation
@@ -130,27 +133,21 @@ def get_or_404(
     ],
 )
 def list_conversations(
-    database: Session = Depends(
-        get_db
-    ),
+    database: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     statement = (
-        select(
-            Conversation
+        select(Conversation)
+        .where(
+            Conversation.user_id == current_user.id
         )
         .order_by(
-            Conversation
-            .updated_at
-            .desc()
+            Conversation.updated_at.desc()
         )
     )
 
     return list(
-        database
-        .scalars(
-            statement
-        )
-        .all()
+        database.scalars(statement).all()
     )
 
 
@@ -167,39 +164,28 @@ def list_conversations(
 )
 def get_conversation(
     conversation_id: int,
-    database: Session = Depends(
-        get_db
-    ),
+    database: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     statement = (
-        select(
-            Conversation
-        )
+        select(Conversation)
         .options(
             selectinload(
                 Conversation.messages
             )
         )
         .where(
-            Conversation.id
-            == conversation_id
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
         )
     )
 
-    conversation = (
-        database.scalar(
-            statement
-        )
-    )
+    conversation = database.scalar(statement)
 
     if conversation is None:
         raise HTTPException(
-            status_code=(
-                status.HTTP_404_NOT_FOUND
-            ),
-            detail=(
-                "Conversation not found"
-            ),
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
         )
 
     return conversation
@@ -218,9 +204,8 @@ def get_conversation(
 )
 def create_conversation(
     payload: CreateConversationRequest,
-    database: Session = Depends(
-        get_db
-    ),
+    database: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     first_prompt = (
         payload
@@ -229,9 +214,10 @@ def create_conversation(
     )
 
     conversation = Conversation(
+        user_id=current_user.id,
         title=create_title(
             first_prompt
-        )
+        ),
     )
 
     database.add(
@@ -239,6 +225,7 @@ def create_conversation(
     )
 
     database.commit()
+
     database.refresh(
         conversation
     )
@@ -270,12 +257,12 @@ def save_message(
     database: Session = Depends(
         get_db
     ),
+    current_user: User = Depends(get_current_user),
 ):
     conversation = get_or_404(
         database=database,
-        conversation_id=(
-            conversation_id
-        ),
+        conversation_id=conversation_id,
+        current_user=current_user,
     )
 
     role = (
@@ -371,12 +358,12 @@ def rename_conversation(
     database: Session = Depends(
         get_db
     ),
+    current_user: User = Depends(get_current_user),
 ):
     conversation = get_or_404(
         database=database,
-        conversation_id=(
-            conversation_id
-        ),
+        conversation_id=conversation_id,
+        current_user=current_user,
     )
 
     title = (
@@ -425,12 +412,12 @@ def delete_conversation(
     database: Session = Depends(
         get_db
     ),
+    current_user: User = Depends(get_current_user),
 ):
     conversation = get_or_404(
         database=database,
-        conversation_id=(
-            conversation_id
-        ),
+        conversation_id=conversation_id,
+        current_user=current_user,
     )
 
     database.delete(

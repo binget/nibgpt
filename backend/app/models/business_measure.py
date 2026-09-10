@@ -8,6 +8,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    CheckConstraint,
 )
 
 from sqlalchemy.orm import (
@@ -64,6 +65,75 @@ class BusinessMeasure(Base):
         String(30),
         nullable=False,
     )
+    
+    temporal_behavior: Mapped[str] = mapped_column(
+        String(30),
+        default="event",
+        nullable=False,
+    )
+
+    time_axis_column_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "metadata_columns.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    period_selection: Mapped[str] = mapped_column(
+        String(30),
+        default="all_rows",
+        nullable=False,
+    )
+
+    historical_source_table_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "metadata_tables.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    historical_value_column_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "metadata_columns.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    
+    temporal_behavior: Mapped[str] = mapped_column(
+        String(30),
+        default="event",
+        nullable=False,
+    )
+
+    time_axis_column_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "metadata_columns.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    period_selection: Mapped[str] = mapped_column(
+        String(30),
+        default="all_rows",
+        nullable=False,
+    )
+
+    historical_source_table_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "metadata_tables.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
 
     trigger_phrases: Mapped[str | None] = mapped_column(
         Text,
@@ -117,4 +187,30 @@ class BusinessMeasure(Base):
 
     column = relationship(
         "MetadataColumn",
+        foreign_keys=[metadata_column_id],
+    )
+
+    time_axis_column = relationship(
+        "MetadataColumn",
+        foreign_keys=[time_axis_column_id],
+    )
+
+    historical_value_column = relationship(
+        "MetadataColumn",
+        foreign_keys=[historical_value_column_id],
+    )
+
+    historical_source_table = relationship(
+        "MetadataTable",
+        foreign_keys=[historical_source_table_id],
+    )
+    
+    time_axis_column = relationship(
+        "MetadataColumn",
+        foreign_keys=[time_axis_column_id],
+    )
+
+    historical_source_table = relationship(
+        "MetadataTable",
+        foreign_keys=[historical_source_table_id],
     )

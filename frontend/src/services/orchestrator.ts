@@ -131,9 +131,20 @@ export async function streamNIBGPT(
       method: "POST",
 
       headers: {
-        "Content-Type":
-          "application/json",
-      },
+      "Content-Type":
+        "application/json",
+
+      ...(localStorage.getItem(
+        "nibgpt_access_token"
+      )
+        ? {
+            Authorization:
+              `Bearer ${localStorage.getItem(
+                "nibgpt_access_token"
+              )}`,
+          }
+        : {}),
+    },
 
       body: JSON.stringify({
       prompt,

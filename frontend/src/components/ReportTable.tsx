@@ -21,13 +21,66 @@ interface ReportTableProps {
 
 
 function formatCellValue(
-  value: unknown
+  value: unknown,
+  column?: string
 ): string {
   if (
     value === null ||
     value === undefined
   ) {
     return "";
+  }
+
+  // ---------------------------------------------
+  // Compact reporting period: YYYYMM
+  // Example:
+  // 202601 -> Jan, 2026
+  // ---------------------------------------------
+  if (
+    typeof value === "number" &&
+    column &&
+    /date|month|period/i.test(column)
+  ) {
+    const text = String(
+      Math.trunc(value)
+    );
+
+    if (text.length === 6) {
+      const year = Number(
+        text.slice(0, 4)
+      );
+
+      const month = Number(
+        text.slice(4, 6)
+      );
+
+      if (
+        year >= 1900 &&
+        year <= 2200 &&
+        month >= 1 &&
+        month <= 12
+      ) {
+        const monthNames = [
+          "Jan",
+          "Feb",
+          "Mar",
+          "Apr",
+          "May",
+          "Jun",
+          "Jul",
+          "Aug",
+          "Sep",
+          "Oct",
+          "Nov",
+          "Dec",
+        ];
+
+        return (
+          `${monthNames[month - 1]}, ` +
+          `${year}`
+        );
+      }
+    }
   }
 
   if (typeof value === "number") {
@@ -244,8 +297,9 @@ export default function ReportTable({
                         }}
                       >
                         {formatCellValue(
-                          row[column]
-                        )}
+                        row[column],
+                        column
+                      )}
                       </Box>
                     )
                   )}

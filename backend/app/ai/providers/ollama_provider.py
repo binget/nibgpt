@@ -195,6 +195,15 @@ class OllamaProvider(AIProvider):
                         yield token
 
                     if data.get("done"):
+                        print(
+                            "DEBUG OLLAMA DONE:",
+                            "done_reason=",
+                            data.get("done_reason"),
+                            "| eval_count=",
+                            data.get("eval_count"),
+                            "| prompt_eval_count=",
+                            data.get("prompt_eval_count"),
+                        )
                         break
 
         except Exception as error:

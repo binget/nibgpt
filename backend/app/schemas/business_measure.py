@@ -12,6 +12,12 @@ class BusinessMeasureCreate(BaseModel):
 
     name: str
     aggregation_function: str
+    
+    temporal_behavior: str = "event"
+    time_axis_column_id: int | None = None
+    period_selection: str = "all_rows"
+    historical_source_table_id: int | None = None
+    historical_value_column_id: int | None = None
 
     trigger_phrases: str | None = None
     synonyms: str | None = None
@@ -30,6 +36,12 @@ class BusinessMeasureUpdate(BaseModel):
 
     name: str | None = None
     aggregation_function: str | None = None
+    
+    temporal_behavior: str | None = None
+    time_axis_column_id: int | None = None
+    period_selection: str | None = None
+    historical_source_table_id: int | None = None
+    historical_value_column_id: int | None = None
 
     trigger_phrases: str | None = None
     synonyms: str | None = None
@@ -81,6 +93,12 @@ class BusinessMeasureResponse(BaseModel):
 
     name: str
     aggregation_function: str
+    
+    temporal_behavior: str
+    time_axis_column_id: int | None
+    period_selection: str
+    historical_source_table_id: int | None
+    historical_value_column_id: int | None
 
     trigger_phrases: str | None
     synonyms: str | None

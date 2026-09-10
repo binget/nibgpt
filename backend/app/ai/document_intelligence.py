@@ -1686,7 +1686,7 @@ def answer_document_question(
                     "provider": provider,
                     "prompt": prompt,
                     "system_prompt": DOCUMENT_SYSTEM_PROMPT,
-                    "num_predict": 900,
+                    "num_predict": 1600,
                     "num_ctx": 4096,
                     "summary_requested": True,
                     "answer_chunks": answer_chunks,

@@ -99,6 +99,43 @@ from app.models.conversation import (
     Conversation,
 )
 
+from app.core.auth_dependencies import get_current_user
+from app.models.user import User
+
+from app.services.authorization_service import (
+    resolve_authorization_requirement,
+)
+
+from app.services.rbac_service import (
+    authorize_request,
+    get_user_data_scopes,
+    get_user_governance_role,
+)
+
+from app.ai.forecast_engine import (
+    build_forecast_history_prompt,
+    extract_forecast_subject,
+    forecast_from_reporting_result,
+    is_forecast_request,
+)
+
+from app.services.semantic_time_series_cache import (
+    build_scope_signature,
+    build_signature,
+    cached_series_to_rows,
+    get_cached_series_by_signature,
+    upsert_series,
+)
+
+from app.models.business_measure import BusinessMeasure
+
+from app.ai.forecast_engine import (
+    build_forecast_history_prompt,
+    extract_forecast_subject,
+    forecast_from_reporting_result,
+    is_forecast_request,
+)
+
 
 router = APIRouter(
     prefix="/api/orchestrator",
@@ -114,14 +151,17 @@ def load_conversation_history(
     database: Session,
     conversation_id: int | None,
     current_prompt: str,
+    current_user: User,
 ) -> list[dict[str, str]]:
 
     if conversation_id is None:
         return []
 
-    conversation = database.get(
-        Conversation,
-        conversation_id,
+    conversation = database.scalar(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
+        )
     )
 
     if conversation is None:
@@ -378,15 +418,99 @@ def normalize_reporting_result(
         "answer": answer,
         "report": report,
         "context": context,
+        "decision": result.get(
+            "decision"
+        ),
         "warnings": warnings,
+        "errors": (
+            result.get(
+                "errors"
+            )
+            or []
+        ),
+        "explanation": (
+            result.get(
+                "explanation"
+            )
+            or []
+        ),
         "sources": (
             result.get(
                 "sources"
             )
             or []
         ),
+}
+
+
+def resolve_forecast_measure_id(
+    database: Session,
+    prompt: str,
+) -> int | None:
+    """
+    Resolve a forecast subject against the semantic catalog.
+
+    This is intentionally generic. It searches measure name,
+    synonyms and trigger phrases instead of hardcoding deposit,
+    account opening, loan, etc.
+    """
+
+    subject = (
+        extract_forecast_subject(prompt)
+        or ""
+    ).lower().strip()
+
+    if not subject:
+        return None
+
+    subject_tokens = {
+        token
+        for token in subject.split()
+        if len(token) >= 3
     }
 
+    measures = (
+        database.query(BusinessMeasure)
+        .filter(
+            BusinessMeasure.is_active.is_(True)
+        )
+        .all()
+    )
+
+    best_measure = None
+    best_score = 0
+
+    for measure in measures:
+        searchable = " ".join(
+            [
+                measure.name or "",
+                measure.synonyms or "",
+                measure.trigger_phrases or "",
+                measure.description or "",
+            ]
+        ).lower()
+
+        score = sum(
+            1
+            for token in subject_tokens
+            if token in searchable
+        )
+
+        # Strong preference for direct phrase match.
+        if subject in searchable:
+            score += 10
+
+        if score > best_score:
+            best_score = score
+            best_measure = measure
+
+    if (
+        best_measure is None
+        or best_score <= 0
+    ):
+        return None
+
+    return best_measure.id
 
 # ============================================================
 # REPORTING
@@ -395,6 +519,9 @@ def normalize_reporting_result(
 def handle_reporting(
     database: Session,
     payload: OrchestratorRequest,
+    governance_role: str,
+    branch_scope_value: str | None,
+    allow_confidential_aggregate: bool,
 ) -> dict:
 
     (
@@ -404,22 +531,238 @@ def handle_reporting(
         payload
     )
 
+    forecast_request = is_forecast_request(
+        payload.prompt
+    )
+
+    # ========================================================
+    # NORMAL REPORTING
+    # ========================================================
+
+    if not forecast_request:
+        result = execute_governed_prompt(
+            database=database,
+            prompt=reporting_prompt,
+            domain_id=None,
+            requested_limit=payload.requested_limit,
+            maximum_entities=payload.maximum_entities,
+            maximum_path_depth=payload.maximum_path_depth,
+            user_role=governance_role,
+            branch_scope_value=branch_scope_value,
+            allow_confidential_aggregate=(
+                allow_confidential_aggregate
+            ),
+        )
+
+        return normalize_reporting_result(
+            result=result,
+            context=reporting_context,
+        )
+
+    # ========================================================
+    # FORECAST
+    # ========================================================
+
+    history_prompt = (
+        build_forecast_history_prompt(
+            payload.prompt
+        )
+    )
+
+    scope_signature = (
+        build_scope_signature(
+            governance_role=governance_role,
+            branch_scope_value=branch_scope_value,
+        )
+    )
+
+    history_signature = build_signature(
+        {
+            "prompt": history_prompt.lower().strip(),
+        }
+    )
+
+    # --------------------------------------------------------
+    # 1. CHECK POSTGRESQL CACHE FIRST
+    # --------------------------------------------------------
+
+    cached_series = (
+        get_cached_series_by_signature(
+            database=database,
+            period_grain="month",
+            filter_signature=history_signature,
+            scope_signature=scope_signature,
+        )
+    )
+
+    if len(cached_series) >= 4:
+
+        measure_name = (
+            extract_forecast_subject(
+                payload.prompt
+            )
+            or "Value"
+        ).title()
+
+        cached_rows = (
+            cached_series_to_rows(
+                cached_series,
+                period_column="Period",
+                value_column=measure_name,
+            )
+        )
+
+        cached_result = {
+            "success": True,
+            "rows": cached_rows,
+            "columns": [
+                "Period",
+                measure_name,
+            ],
+            "row_count": len(
+                cached_rows
+            ),
+            "warnings": [],
+            "errors": [],
+            "sources": [],
+            "cache_status": "hit",
+        }
+
+        result = (
+            forecast_from_reporting_result(
+                result=cached_result,
+                forecast_prompt=payload.prompt,
+            )
+        )
+
+        result["cache_status"] = "hit"
+
+        return normalize_reporting_result(
+            result=result,
+            context=reporting_context,
+        )
+
+    # --------------------------------------------------------
+    # 2. CACHE MISS -> USE GOVERNED REPORTING
+    # --------------------------------------------------------
+
     result = execute_governed_prompt(
         database=database,
-        prompt=reporting_prompt,
+        prompt=history_prompt,
         domain_id=None,
-        requested_limit=(
-            payload.requested_limit
+        requested_limit=payload.requested_limit,
+        maximum_entities=payload.maximum_entities,
+        maximum_path_depth=payload.maximum_path_depth,
+        user_role=governance_role,
+        branch_scope_value=branch_scope_value,
+        allow_confidential_aggregate=(
+            allow_confidential_aggregate
         ),
-        maximum_entities=(
-            payload.maximum_entities
-        ),
-        maximum_path_depth=(
-            payload.maximum_path_depth
-        ),
-        user_role=(
-            payload.user_role
-        ),
+    )
+
+    # --------------------------------------------------------
+    # 3. SAVE VERIFIED HISTORY INTO CACHE
+    # --------------------------------------------------------
+
+    if (
+        isinstance(result, dict)
+        and result.get("success")
+    ):
+        rows = list(
+            result.get("rows")
+            or []
+        )
+
+        if rows:
+            first_row = rows[0]
+
+            period_column = None
+            value_column = None
+
+            for column in first_row.keys():
+                normalized = str(
+                    column
+                ).lower()
+
+                if (
+                    "period" in normalized
+                    or "month" in normalized
+                    or "date" in normalized
+                    or "procdate" in normalized
+                    or "opening" in normalized
+                ):
+                    period_column = column
+                    break
+
+            if period_column is None:
+                period_column = next(
+                    iter(first_row.keys()),
+                    None,
+                )
+
+            for column in first_row.keys():
+                if column == period_column:
+                    continue
+
+                sample_value = first_row.get(
+                    column
+                )
+
+                try:
+                    float(
+                        str(sample_value).replace(
+                            ",",
+                            "",
+                        )
+                    )
+                    value_column = column
+                    break
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    continue
+
+            measure_id = (
+                resolve_forecast_measure_id(
+                    database=database,
+                    prompt=payload.prompt,
+                )
+            )
+
+            if (
+                measure_id is not None
+                and period_column is not None
+                and value_column is not None
+            ):
+                upsert_series(
+                    database=database,
+                    business_measure_id=measure_id,
+                    period_grain="month",
+                    rows=rows,
+                    period_column=period_column,
+                    value_column=value_column,
+                    dimension_signature="none",
+                    filter_signature=history_signature,
+                    scope_signature=scope_signature,
+                    source_table="governed_reporting",
+                    commit=True,
+                )
+
+                result["cache_status"] = "stored"
+
+    # --------------------------------------------------------
+    # 4. FORECAST FROM VERIFIED HISTORY
+    # --------------------------------------------------------
+
+    result = forecast_from_reporting_result(
+        result=result,
+        forecast_prompt=payload.prompt,
+    )
+
+    result["cache_status"] = (
+        result.get("cache_status")
+        or "miss"
     )
 
     return normalize_reporting_result(
@@ -695,16 +1038,11 @@ def handle_general(
     # Normal AI conversation
     # --------------------------------------------------------
 
-    history = (
-        load_conversation_history(
-            database=database,
-            conversation_id=(
-                payload.conversation_id
-            ),
-            current_prompt=(
-                payload.prompt
-            ),
-        )
+    history = load_conversation_history(
+        database=database,
+        conversation_id=payload.conversation_id,
+        current_prompt=prompt,
+        current_user=current_user,
     )
 
     answer = (
@@ -761,6 +1099,9 @@ def ask_nibgpt(
     database: Session = Depends(
         get_db
     ),
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
 
     prompt = (
@@ -808,6 +1149,77 @@ def ask_nibgpt(
         reason = (
             decision.reason
         )
+        
+            # ========================================================
+        # AUTHORIZATION GATE
+        #
+        # This MUST execute before any route handler.
+        # No reporting/document/tool/data-source execution may
+        # happen before this check succeeds.
+        # ========================================================
+
+        authorization = (
+            resolve_authorization_requirement(
+                prompt=prompt,
+                route=route,
+            )
+        )
+
+        authorize_request(
+            database=database,
+            user=current_user,
+            permission_code=(
+                authorization.permission_code
+            ),
+            resource=(
+                authorization.resource
+            ),
+            request_text=prompt,
+        )
+        
+        allow_confidential_aggregate = (
+            authorization.permission_code
+            in {
+                "deposit.summary.view",
+                "deposit.forecast.view",
+                "account_opening.analytics.view",
+                "account_opening.forecast.view",
+            }
+        )
+        
+        governance_role = (
+            get_user_governance_role(
+                database=database,
+                user_id=current_user.id,
+            )
+        )
+        
+        user_scopes = get_user_data_scopes(
+            database=database,
+            user_id=current_user.id,
+        )
+
+        has_enterprise_scope = any(
+            scope.scope_type == "enterprise"
+            and scope.scope_value == "*"
+            for scope in user_scopes
+        )
+
+        branch_scope_value = None
+
+        if not has_enterprise_scope:
+            branch_scopes = [
+                scope.scope_value
+                for scope in user_scopes
+                if (
+                    scope.scope_type == "branch"
+                    and scope.scope_value
+                )
+            ]
+
+            if branch_scopes:
+                branch_scope_value = branch_scopes[0]
+
 
     try:
 
@@ -820,6 +1232,11 @@ def ask_nibgpt(
             result = handle_reporting(
                 database=database,
                 payload=payload,
+                governance_role=governance_role,
+                branch_scope_value=branch_scope_value,
+                allow_confidential_aggregate=(
+                    allow_confidential_aggregate
+                ),
             )
 
         # ====================================================
@@ -935,6 +1352,17 @@ def ask_nibgpt(
         ),
         context=result.get(
             "context"
+        ),
+        decision=result.get(
+            "decision"
+        ),
+        errors=result.get(
+            "errors",
+            [],
+        ),
+        explanation=result.get(
+            "explanation",
+            [],
         ),
         warnings=result.get(
             "warnings",

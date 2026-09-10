@@ -60,6 +60,16 @@ class OrchestratorResponse(BaseModel):
     answer: str | None = None
     report: dict | None = None
     context: ReportingContext | None = None
+    
+    decision: str | None = None
+
+    errors: list[str] = Field(
+        default_factory=list
+    )
+
+    explanation: list[str] = Field(
+        default_factory=list
+    )
 
     warnings: list[str] = Field(
         default_factory=list
