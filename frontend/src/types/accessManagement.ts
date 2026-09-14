@@ -75,3 +75,26 @@ export interface AdminRoleListResponse {
   data: AdminRole[];
   count: number;
 }
+
+export interface AdminRoleCreate {
+  name: string;
+  description: string;
+  permission_ids: number[];
+}
+
+export interface AdminRoleUpdate {
+  name?: string;
+  description?: string;
+  is_active?: boolean;
+  permission_ids?: number[];
+}
+
+export interface AdminRoleResponse {
+  message?: string;
+  data: AdminRole;
+}
+
+export interface AdminPermissionListResponse {
+  data: AdminPermission[];
+  count: number;
+}

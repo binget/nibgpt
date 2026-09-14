@@ -6,6 +6,10 @@ import type {
   AdminUserListResponse,
   AdminUserResponse,
   AdminUserUpdate,
+  AdminPermissionListResponse,
+AdminRoleCreate,
+AdminRoleResponse,
+AdminRoleUpdate,
 } from "../types/accessManagement";
 
 
@@ -61,6 +65,39 @@ export async function updateAdminUserStatus(
     {
       is_active: isActive,
     }
+  );
+
+  return response.data;
+}
+
+export async function getAdminPermissions(): Promise<AdminPermissionListResponse> {
+  const response = await api.get<AdminPermissionListResponse>(
+    "/api/admin/permissions"
+  );
+
+  return response.data;
+}
+
+
+export async function createAdminRole(
+  payload: AdminRoleCreate
+): Promise<AdminRoleResponse> {
+  const response = await api.post<AdminRoleResponse>(
+    "/api/admin/roles",
+    payload
+  );
+
+  return response.data;
+}
+
+
+export async function updateAdminRole(
+  roleId: number,
+  payload: AdminRoleUpdate
+): Promise<AdminRoleResponse> {
+  const response = await api.put<AdminRoleResponse>(
+    `/api/admin/roles/${roleId}`,
+    payload
   );
 
   return response.data;
