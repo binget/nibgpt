@@ -1,5 +1,3 @@
-from datetime import datetime, timedelta, timezone
-
 from jose import JWTError, jwt
 from pwdlib import PasswordHash
 
@@ -25,14 +23,13 @@ def verify_password(
     )
 
 
-def create_access_token(subject: str) -> str:
-    expire_time = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.access_token_expire_minutes
-    )
-
+def create_access_token(
+    subject: str,
+    session_id: str,
+) -> str:
     payload = {
         "sub": subject,
-        "exp": expire_time,
+        "sid": session_id,
     }
 
     return jwt.encode(
@@ -42,7 +39,9 @@ def create_access_token(subject: str) -> str:
     )
 
 
-def decode_access_token(token: str) -> str | None:
+def decode_access_token(
+    token: str,
+) -> dict | None:
     try:
         payload = jwt.decode(
             token,
@@ -50,7 +49,16 @@ def decode_access_token(token: str) -> str | None:
             algorithms=[ALGORITHM],
         )
 
-        return payload.get("sub")
+        subject = payload.get("sub")
+        session_id = payload.get("sid")
+
+        if not subject or not session_id:
+            return None
+
+        return {
+            "sub": subject,
+            "sid": session_id,
+        }
 
     except JWTError:
         return None

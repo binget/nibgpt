@@ -19,7 +19,7 @@ import {
 AccountCircle,
 } from "@mui/icons-material";
 
-
+import api from "../services/api";
 
 function Topbar() {
   const navigate = useNavigate();
@@ -29,10 +29,21 @@ function Topbar() {
 
   const menuOpen = Boolean(anchorElement);
 
-  const handleLogout = () => {
-    localStorage.removeItem("nibgpt_access_token");
+  const handleLogout = async () => {
+  try {
+    await api.post("/api/auth/logout");
+  } catch (error) {
+    console.error(
+      "Server logout failed:",
+      error
+    );
+  } finally {
+    localStorage.removeItem(
+      "nibgpt_access_token"
+    );
     navigate("/login");
-  };
+  }
+};
 
   return (
     <AppBar

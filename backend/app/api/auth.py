@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.services.rbac_service import require_permission
 
-from app.core.auth_dependencies import get_current_user
-from app.core.security import create_access_token
+from app.core.auth_dependencies import get_current_user,oauth2_scheme
+from app.core.security import create_access_token,decode_access_token
 from app.database.session import get_db
 from app.models.user import User
 from app.schemas.auth import LoginRequest, TokenResponse
@@ -13,6 +13,10 @@ from app.services.user_service import (
     create_user,
     get_user_by_email,
     get_user_by_username,
+)
+from app.services.auth_session_service import (
+    create_auth_session,
+    revoke_auth_session,
 )
 
 
@@ -75,8 +79,14 @@ def login(
             detail="Invalid username or password",
         )
 
+    auth_session = create_auth_session(
+        database,
+        user.id,
+    )
+
     token = create_access_token(
-        str(user.id)
+        str(user.id),
+        auth_session.session_id,
     )
 
     return TokenResponse(
@@ -94,6 +104,44 @@ def get_me(
     ),
 ):
     return current_user
+
+@router.post("/logout")
+def logout(
+    token: str = Depends(oauth2_scheme),
+    current_user: User = Depends(get_current_user),
+    database: Session = Depends(get_db),
+):
+    payload = decode_access_token(token)
+
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+        )
+
+    session_id = payload.get("sid")
+
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication session",
+        )
+
+    revoked = revoke_auth_session(
+        database,
+        session_id,
+    )
+
+    if not revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication session is no longer active",
+        )
+
+    return {
+        "message": "Logged out successfully",
+        "user": current_user.username,
+    }
 
 @router.get(
     "/security-test/account-balance",
