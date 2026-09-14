@@ -54,6 +54,10 @@ from app.models.semantic_time_series import (
     SemanticTimeSeries,
 )
 
+from app.models.document_learning import (
+    DocumentLearning,
+)
+
 __all__ = [
     "User",
     "DataSource",
