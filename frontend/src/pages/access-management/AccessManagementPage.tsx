@@ -1,8 +1,10 @@
 import { AddOutlined, EditOutlined, LockOutlined, LockOpenOutlined, SearchOutlined, } from "@mui/icons-material";
 import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, IconButton, InputAdornment, InputLabel, MenuItem, Paper, Select, Stack, Tab, Tabs, TextField, Tooltip, Typography, Checkbox, } from "@mui/material";
 import { useEffect, useMemo, useState } from "react";
-import { createAdminRole, createAdminUser, getAdminPermissions, getAdminRoles, getAdminUsers, updateAdminRole, updateAdminUser, updateAdminUserStatus, } from "../../services/accessManagement";
-import type { AdminPermission, AdminRole, AdminRoleCreate, AdminRoleUpdate, AdminUser, AdminUserCreate, AdminUserScope, AdminUserUpdate, } from "../../types/accessManagement";
+import { createAdminRole, createAdminUser, getAdminPermissions, getAdminRoles, getAdminUsers, updateAdminRole, updateAdminUser, updateAdminUserStatus,createAdminPermission,
+updateAdminPermission, } from "../../services/accessManagement";
+import type { AdminPermission, AdminRole, AdminRoleCreate, AdminRoleUpdate, AdminUser, AdminUserCreate, AdminUserScope, AdminUserUpdate, AdminPermissionCreate,
+AdminPermissionUpdate, } from "../../types/accessManagement";
 type ScopeType = "enterprise" | "department" | "branch" | "self";
 interface UserFormState {
     username: string;
@@ -32,6 +34,18 @@ const emptyRoleForm: RoleFormState = {
     description: "",
     permission_ids: [],
 };
+
+interface PermissionFormState {
+  code: string;
+  description: string;
+}
+
+const emptyPermissionForm: PermissionFormState = {
+  code: "",
+  description: "",
+};
+
+
 function AccessManagementPage() {
     const [tab, setTab] = useState(0);
     const [users, setUsers] = useState<AdminUser[]>([]);
@@ -41,6 +55,14 @@ function AccessManagementPage() {
     const [editingRole, setEditingRole] = useState<AdminRole | null>(null);
     const [roleForm, setRoleForm] = useState<RoleFormState>(emptyRoleForm);
     const [permissionsLoading, setPermissionsLoading] = useState(false);
+    const [permissionDialogOpen, setPermissionDialogOpen] =
+  useState(false);
+
+const [editingPermission, setEditingPermission] =
+  useState<AdminPermission | null>(null);
+
+const [permissionForm, setPermissionForm] =
+  useState<PermissionFormState>(emptyPermissionForm);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
@@ -72,8 +94,11 @@ function AccessManagementPage() {
         loadData();
     }, []);
     useEffect(() => {
-        if (tab !== 1 || permissions.length > 0) {
-            return;
+        if (
+          (tab !== 1 && tab !== 2) ||
+          permissions.length > 0
+        ) {
+          return;
         }
         async function loadPermissions() {
             setPermissionsLoading(true);
@@ -347,7 +372,141 @@ function AccessManagementPage() {
                 `Unable to ${action} role.`);
         }
     }
-    return (<Box>
+
+    function openCreatePermissionDialog() {
+  setEditingPermission(null);
+  setPermissionForm(emptyPermissionForm);
+  setError("");
+  setSuccess("");
+  setPermissionDialogOpen(true);
+}
+
+function openEditPermissionDialog(
+  permission: AdminPermission
+) {
+  setEditingPermission(permission);
+
+  setPermissionForm({
+    code: permission.code,
+    description: permission.description || "",
+  });
+
+  setError("");
+  setSuccess("");
+  setPermissionDialogOpen(true);
+}
+
+async function refreshPermissions() {
+  const response = await getAdminPermissions();
+  setPermissions(response.data);
+}
+
+async function handleSavePermission() {
+  setSaving(true);
+  setError("");
+  setSuccess("");
+
+  try {
+    if (!permissionForm.code.trim()) {
+      setError("Permission code is required.");
+      return;
+    }
+
+    if (editingPermission) {
+      const payload: AdminPermissionUpdate = {
+        code: permissionForm.code.trim(),
+        description:
+          permissionForm.description.trim(),
+      };
+
+      await updateAdminPermission(
+        editingPermission.id,
+        payload
+      );
+
+      setSuccess(
+        "Permission updated successfully."
+      );
+    } else {
+      const payload: AdminPermissionCreate = {
+        code: permissionForm.code.trim(),
+        description:
+          permissionForm.description.trim(),
+      };
+
+      await createAdminPermission(payload);
+
+      setSuccess(
+        "Permission created successfully."
+      );
+    }
+
+    setPermissionDialogOpen(false);
+    await refreshPermissions();
+  } catch (err: any) {
+    setError(
+      err?.response?.data?.detail ||
+        "Unable to save permission."
+    );
+  } finally {
+    setSaving(false);
+  }
+}
+
+async function handlePermissionStatusChange(
+  permission: AdminPermission
+) {
+  const action = permission.is_active
+    ? "disable"
+    : "activate";
+
+  if (
+    permission.code ===
+      "admin.permissions.manage" &&
+    permission.is_active
+  ) {
+    setError(
+      "admin.permissions.manage cannot be disabled."
+    );
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Are you sure you want to ${action} ${permission.code}?`
+  );
+
+  if (!confirmed) {
+    return;
+  }
+
+  setError("");
+  setSuccess("");
+
+  try {
+    await updateAdminPermission(
+      permission.id,
+      {
+        is_active: !permission.is_active,
+      }
+    );
+
+    setSuccess(
+      permission.is_active
+        ? "Permission disabled successfully."
+        : "Permission activated successfully."
+    );
+
+    await refreshPermissions();
+  } catch (err: any) {
+    setError(
+      err?.response?.data?.detail ||
+        `Unable to ${action} permission.`
+    );
+  }
+}
+
+    return ( 
+    <Box>
       <Stack direction={{
             xs: "column",
             md: "row",
@@ -372,17 +531,23 @@ function AccessManagementPage() {
           </Typography>
         </Box>
 
-        {(tab === 0 || tab === 1) && (<Button variant="contained" startIcon={<AddOutlined />} onClick={tab === 0
-                ? openCreateDialog
-                : openCreateRoleDialog} sx={{
+        {(tab === 0 || tab === 1 || tab === 2) && (<Button variant="contained" startIcon={<AddOutlined />} onClick={
+  tab === 0
+    ? openCreateDialog
+    : tab === 1
+      ? openCreateRoleDialog
+      : openCreatePermissionDialog
+} sx={{
                 bgcolor: "#5b311b",
                 "&:hover": {
                     bgcolor: "#472512",
                 },
             }}>
           {tab === 0
-                ? "Create User"
-                : "Create Role"}
+  ? "Create User"
+  : tab === 1
+    ? "Create Role"
+    : "Create Permission"}
         </Button>)}
       </Stack>
 
@@ -696,12 +861,195 @@ function AccessManagementPage() {
   </Box>)}
 
 
-        {tab === 2 && (<Box sx={{ p: 4 }}>
-            <Typography fontWeight={700} color="text.secondary">
-              Permissions management will be
-              added after roles.
-            </Typography>
-          </Box>)}
+        {tab === 2 && (
+  <Box sx={{ p: 3 }}>
+    {permissionsLoading ? (
+      <Box
+        sx={{
+          py: 8,
+          display: "flex",
+          justifyContent: "center",
+        }}
+      >
+        <CircularProgress />
+      </Box>
+    ) : (
+      <Box sx={{ overflowX: "auto" }}>
+        <Box
+          component="table"
+          sx={{
+            width: "100%",
+            borderCollapse: "collapse",
+            minWidth: 800,
+            "& th": {
+              textAlign: "left",
+              py: 1.5,
+              px: 2,
+              fontSize: "0.78rem",
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+              color: "text.secondary",
+              borderBottom: "1px solid",
+              borderColor: "divider",
+            },
+            "& td": {
+              py: 1.6,
+              px: 2,
+              borderBottom: "1px solid",
+              borderColor: "divider",
+              verticalAlign: "middle",
+            },
+          }}
+        >
+          <Box component="thead">
+            <Box component="tr">
+              <Box component="th">
+                Permission
+              </Box>
+
+              <Box component="th">
+                Description
+              </Box>
+
+              <Box component="th">
+                Status
+              </Box>
+
+              <Box
+                component="th"
+                sx={{
+                  width: 110,
+                  textAlign:
+                    "right !important",
+                }}
+              >
+                Actions
+              </Box>
+            </Box>
+          </Box>
+
+          <Box component="tbody">
+            {permissions.map(
+              (permission) => (
+                <Box
+                  component="tr"
+                  key={permission.id}
+                >
+                  <Box component="td">
+                    <Typography
+                      sx={{
+                        fontWeight: 700,
+                        color: "#3d2315",
+                      }}
+                    >
+                      {permission.code}
+                    </Typography>
+                  </Box>
+
+                  <Box component="td">
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                    >
+                      {permission.description ||
+                        "No description"}
+                    </Typography>
+                  </Box>
+
+                  <Box component="td">
+                    <Chip
+                      label={
+                        permission.is_active
+                          ? "Active"
+                          : "Disabled"
+                      }
+                      size="small"
+                      color={
+                        permission.is_active
+                          ? "success"
+                          : "default"
+                      }
+                    />
+                  </Box>
+
+                  <Box
+                    component="td"
+                    sx={{
+                      textAlign: "right",
+                    }}
+                  >
+                    <Tooltip title="Edit permission">
+                      <IconButton
+                        size="small"
+                        onClick={() =>
+                          openEditPermissionDialog(
+                            permission
+                          )
+                        }
+                      >
+                        <EditOutlined fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+
+                    <Tooltip
+                      title={
+                        permission.code ===
+                          "admin.permissions.manage" &&
+                        permission.is_active
+                          ? "Protected permission"
+                          : permission.is_active
+                            ? "Disable permission"
+                            : "Activate permission"
+                      }
+                    >
+                      <span>
+                        <IconButton
+                          size="small"
+                          disabled={
+                            permission.code ===
+                              "admin.permissions.manage" &&
+                            permission.is_active
+                          }
+                          onClick={() =>
+                            handlePermissionStatusChange(
+                              permission
+                            )
+                          }
+                        >
+                          {permission.is_active ? (
+                            <LockOutlined fontSize="small" />
+                          ) : (
+                            <LockOpenOutlined fontSize="small" />
+                          )}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </Box>
+                </Box>
+              )
+            )}
+
+            {!permissions.length && (
+              <Box component="tr">
+                <Box
+                  component="td"
+                  colSpan={4}
+                  sx={{
+                    textAlign: "center",
+                    py: "48px !important",
+                    color: "text.secondary",
+                  }}
+                >
+                  No permissions found.
+                </Box>
+              </Box>
+            )}
+          </Box>
+        </Box>
+      </Box>
+    )}
+  </Box>
+)}
       </Paper>
 
 
@@ -946,6 +1294,92 @@ function AccessManagementPage() {
     </Button>
   </DialogActions>
     </Dialog>
+
+    <Dialog
+  open={permissionDialogOpen}
+  onClose={() =>
+    !saving &&
+    setPermissionDialogOpen(false)
+  }
+  fullWidth
+  maxWidth="sm"
+>
+  <DialogTitle
+    sx={{
+      fontWeight: 800,
+      color: "#3d2315",
+    }}
+  >
+    {editingPermission
+      ? "Edit Permission"
+      : "Create Permission"}
+  </DialogTitle>
+
+  <DialogContent>
+    <Stack spacing={2.5} sx={{ mt: 1 }}>
+      <TextField
+        label="Permission Code"
+        value={permissionForm.code}
+        onChange={(event) =>
+          setPermissionForm({
+            ...permissionForm,
+            code: event.target.value,
+          })
+        }
+        placeholder="example.feature.view"
+        required
+      />
+
+      <TextField
+        label="Description"
+        value={permissionForm.description}
+        onChange={(event) =>
+          setPermissionForm({
+            ...permissionForm,
+            description:
+              event.target.value,
+          })
+        }
+        multiline
+        minRows={3}
+      />
+    </Stack>
+  </DialogContent>
+
+  <DialogActions
+    sx={{
+      px: 3,
+      pb: 3,
+    }}
+  >
+    <Button
+      onClick={() =>
+        setPermissionDialogOpen(false)
+      }
+      disabled={saving}
+    >
+      Cancel
+    </Button>
+
+    <Button
+      variant="contained"
+      onClick={handleSavePermission}
+      disabled={saving}
+      sx={{
+        bgcolor: "#5b311b",
+        "&:hover": {
+          bgcolor: "#472512",
+        },
+      }}
+    >
+      {saving
+        ? "Saving..."
+        : editingPermission
+          ? "Save Changes"
+          : "Create Permission"}
+    </Button>
+  </DialogActions>
+</Dialog>
     </Box>);
 }
 export default AccessManagementPage;

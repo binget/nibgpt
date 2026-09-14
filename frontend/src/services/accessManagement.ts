@@ -10,6 +10,9 @@ import type {
 AdminRoleCreate,
 AdminRoleResponse,
 AdminRoleUpdate,
+AdminPermissionCreate,
+AdminPermissionResponse,
+AdminPermissionUpdate,
 } from "../types/accessManagement";
 
 
@@ -99,6 +102,31 @@ export async function updateAdminRole(
     `/api/admin/roles/${roleId}`,
     payload
   );
+
+  return response.data;
+}
+
+export async function createAdminPermission(
+  payload: AdminPermissionCreate
+): Promise<AdminPermissionResponse> {
+  const response =
+    await api.post<AdminPermissionResponse>(
+      "/api/admin/permissions",
+      payload
+    );
+
+  return response.data;
+}
+
+export async function updateAdminPermission(
+  permissionId: number,
+  payload: AdminPermissionUpdate
+): Promise<AdminPermissionResponse> {
+  const response =
+    await api.put<AdminPermissionResponse>(
+      `/api/admin/permissions/${permissionId}`,
+      payload
+    );
 
   return response.data;
 }

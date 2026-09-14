@@ -98,3 +98,19 @@ export interface AdminPermissionListResponse {
   data: AdminPermission[];
   count: number;
 }
+
+export interface AdminPermissionCreate {
+  code: string;
+  description: string;
+}
+
+export interface AdminPermissionUpdate {
+  code?: string;
+  description?: string;
+  is_active?: boolean;
+}
+
+export interface AdminPermissionResponse {
+  message?: string;
+  data: AdminPermission;
+}
