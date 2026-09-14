@@ -95,6 +95,10 @@ from app.api.admin_roles import (
     router as admin_roles_router,
 )
 
+from app.api.admin_permissions import (
+    router as admin_permissions_router,
+)
+
 app = FastAPI(
     title="NibGPT API",
     description="Nib International Bank Enterprise AI Platform",
@@ -141,6 +145,7 @@ app.include_router(stream_router)
 app.include_router(web_intelligence_router)
 app.include_router(admin_users_router)
 app.include_router(admin_roles_router)
+app.include_router(admin_permissions_router)
 
 @app.get("/")
 def home():
