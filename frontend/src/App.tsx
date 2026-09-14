@@ -19,6 +19,7 @@ import SqlCompilerPage from "./pages/sql-compiler/SqlCompilerPage";
 import BusinessRuleRegistryPage from "./pages/business-rules/BusinessRuleRegistryPage";
 import AskNIBGPTPage from "./pages/ask";
 import NIBGPTPage from "./pages/nibgpt/NIBGPTPage";
+import AccessManagementPage from "./pages/access-management/AccessManagementPage";
 
 function App() {
   return (
@@ -143,12 +144,7 @@ function App() {
 
           <Route
             path="/users"
-            element={
-              <PlaceholderPage
-                title="User Management"
-                description="Administrators will create, activate and manage NIBGPT users here."
-              />
-            }
+            element={<AccessManagementPage />}
           />
 
           <Route
