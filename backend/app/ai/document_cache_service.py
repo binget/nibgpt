@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -1151,74 +1152,6 @@ def retrieve_cached_chunks(
     limit: int = 6,
 ) -> list[dict]:
     """
-    Retrieve the most relevant already-indexed document
-    chunks directly from PostgreSQL.
-
-    This avoids PDF extraction, OCR and section parsing.
-    """
-
-    chunks = get_cached_chunks(
-        database=database,
-        document_index_id=document_index_id,
-    )
-
-    if not chunks:
-        return []
-
-    from app.ai.document_retriever import (
-        score_chunk,
-        expand_related_sections,
-    )
-
-    scored_chunks = []
-
-    for chunk in chunks:
-
-        score = score_chunk(
-            question=question,
-            chunk=chunk,
-        )
-
-        scored_chunk = dict(
-            chunk
-        )
-
-        scored_chunk["score"] = (
-            score
-        )
-
-        scored_chunks.append(
-            scored_chunk
-        )
-
-    scored_chunks.sort(
-        key=lambda item: item.get(
-            "score",
-            0,
-        ),
-        reverse=True,
-    )
-
-    selected = (
-        scored_chunks[:limit]
-    )
-
-    selected = expand_related_sections(
-        question=question,
-        selected_chunks=selected,
-        all_chunks=scored_chunks,
-        limit=limit,
-    )
-
-    return selected
-
-def retrieve_cached_chunks(
-    database: Session,
-    document_index_id: int,
-    question: str,
-    limit: int = 6,
-) -> list[dict]:
-    """
     Rank already-indexed PostgreSQL chunks without
     downloading, OCR-processing or reparsing the PDF.
     """
@@ -1255,6 +1188,110 @@ def retrieve_cached_chunks(
                 )
             ),
         )
+
+        # -------------------------------------------------
+        # Embedded heading relevance boost
+        #
+        # Some OCR/parser chunks contain a more specific
+        # subheading inside the chunk body than the stored
+        # section_title metadata. Give such headings a modest
+        # boost when they closely match the user's question.
+        # -------------------------------------------------
+
+        question_words = {
+            word
+            for word in re.findall(
+                r"[a-z0-9]+",
+                (question or "").lower(),
+            )
+            if len(word) >= 4
+            and word not in {
+                "what",
+                "does",
+                "about",
+                "from",
+                "this",
+                "that",
+                "with",
+                "have",
+                "says",
+                "tell",
+                "explain",
+                "policy",
+            }
+        }
+
+        content_text = (
+            chunk.get("content")
+            or ""
+        )
+
+        best_heading_boost = 0.0
+
+        for raw_line in content_text.splitlines()[:40]:
+
+            line = raw_line.strip()
+
+            if not line:
+                continue
+
+            # Headings should be relatively short.
+            if len(line) > 100:
+                continue
+
+            heading_words = [
+                word
+                for word in re.findall(
+                    r"[a-z0-9]+",
+                    line.lower(),
+                )
+                if len(word) >= 4
+                and not word.isdigit()
+            ]
+
+            if not heading_words:
+                continue
+
+            if len(heading_words) > 8:
+                continue
+
+            heading_word_set = set(
+                heading_words
+            )
+
+            matched_words = (
+                heading_word_set
+                & question_words
+            )
+
+            if not matched_words:
+                continue
+
+            match_ratio = (
+                len(matched_words)
+                / len(heading_word_set)
+            )
+
+            heading_boost = 0.0
+
+            if (
+                len(matched_words) >= 2
+                and match_ratio >= 0.60
+            ):
+                heading_boost = 3.0
+
+            elif match_ratio >= 0.50:
+                heading_boost = 1.5
+
+            elif len(matched_words) >= 2:
+                heading_boost = 1.0
+
+            best_heading_boost = max(
+                best_heading_boost,
+                heading_boost,
+            )
+
+        score += best_heading_boost
 
         scored_chunk = dict(
             chunk

@@ -135,6 +135,9 @@ from app.ai.forecast_engine import (
     forecast_from_reporting_result,
     is_forecast_request,
 )
+from app.services.document_learning_retrieval_service import (
+    discover_documents_from_learning,
+)
 
 
 router = APIRouter(
@@ -1149,7 +1152,7 @@ def ask_nibgpt(
         reason = (
             decision.reason
         )
-        
+
             # ========================================================
         # AUTHORIZATION GATE
         #
@@ -1176,7 +1179,79 @@ def ask_nibgpt(
             ),
             request_text=prompt,
         )
-        
+
+                # ========================================================
+        # DOCUMENT LEARNING ROUTE PROMOTION
+        #
+        # A prompt classified as general may still match a
+        # validated concept/alias learned from an internal
+        # document.
+        #
+        # The initial authorization has already succeeded.
+        # If promoted, documents.view is authorized before
+        # the knowledge route is returned or executed.
+        # ========================================================
+
+        if route == "general":
+
+            learned_documents = (
+                discover_documents_from_learning(
+                    database=database,
+                    query=prompt,
+                    limit=3,
+                )
+            )
+
+            if learned_documents:
+
+                route = "knowledge"
+                confidence = 95
+                reason = (
+                    "The prompt matches a validated "
+                    "concept or alias learned from an "
+                    "internal document."
+                )
+
+                authorization = (
+                    resolve_authorization_requirement(
+                        prompt=prompt,
+                        route=route,
+                    )
+                )
+
+                authorize_request(
+                    database=database,
+                    user=current_user,
+                    permission_code=(
+                        authorization.permission_code
+                    ),
+                    resource=(
+                        authorization.resource
+                    ),
+                    request_text=prompt,
+                )
+
+                print(
+                    "DEBUG DOCUMENT LEARNING ROUTE:",
+                    "promoted=True",
+                    "| query=",
+                    prompt,
+                    "| candidates=",
+                    [
+                        {
+                            "document_index_id":
+                                item.get(
+                                    "document_index_id"
+                                ),
+                            "score":
+                                item.get("score"),
+                        }
+                        for item
+                        in learned_documents
+                    ],
+                    flush=True,
+                )
+
         allow_confidential_aggregate = (
             authorization.permission_code
             in {
@@ -1186,14 +1261,14 @@ def ask_nibgpt(
                 "account_opening.forecast.view",
             }
         )
-        
+
         governance_role = (
             get_user_governance_role(
                 database=database,
                 user_id=current_user.id,
             )
         )
-        
+
         user_scopes = get_user_data_scopes(
             database=database,
             user_id=current_user.id,

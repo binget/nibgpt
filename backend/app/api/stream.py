@@ -63,6 +63,10 @@ from app.services.rbac_service import (
     authorize_request,
 )
 
+from app.services.document_learning_retrieval_service import (
+    discover_documents_from_learning,
+)
+
 
 router = APIRouter(
     prefix="/api/orchestrator",
@@ -79,7 +83,7 @@ class StreamRequest(BaseModel):
     conversation_id: int | None = None
 
     mode: str = "general"
-    
+
 class ReportExplanationRequest(
     BaseModel
 ):
@@ -106,7 +110,7 @@ def load_conversation_history(
     conversation_id: int | None,
     current_prompt: str,
     current_user: User,
-    
+
 ) -> list[dict[str, str]]:
     if conversation_id is None:
         return []
@@ -246,6 +250,73 @@ def stream_nibgpt(
         ),
         request_text=payload.prompt,
     )
+
+        # ========================================================
+    # DOCUMENT LEARNING ROUTE PROMOTION
+    #
+    # A prompt may look "general" lexically but match a
+    # validated concept/alias learned from an internal
+    # document, e.g. "What is BNPL?".
+    #
+    # Discovery happens only AFTER the base authorization
+    # check. If promoted to knowledge, documents.view is
+    # authorized before any document retrieval occurs.
+    # ========================================================
+
+    if route == "general":
+
+        learned_documents = (
+            discover_documents_from_learning(
+                database=database,
+                query=payload.prompt,
+                limit=3,
+            )
+        )
+
+        if learned_documents:
+
+            route = "knowledge"
+
+            authorization = (
+                resolve_authorization_requirement(
+                    prompt=payload.prompt,
+                    route=route,
+                )
+            )
+
+            authorize_request(
+                database=database,
+                user=current_user,
+                permission_code=(
+                    authorization.permission_code
+                ),
+                resource=(
+                    authorization.resource
+                ),
+                request_text=payload.prompt,
+            )
+
+            print(
+                "DEBUG DOCUMENT LEARNING ROUTE:",
+                "promoted=True",
+                "| query=",
+                payload.prompt,
+                "| candidates=",
+                [
+                    {
+                        "document_index_id":
+                            item.get(
+                                "document_index_id"
+                            ),
+                        "score":
+                            item.get("score"),
+                    }
+                    for item
+                    in learned_documents
+                ],
+                flush=True,
+            )
+
     history = (
         load_conversation_history(
             database=database,
@@ -254,6 +325,9 @@ def stream_nibgpt(
             ),
             current_prompt=(
                 payload.prompt
+            ),
+            current_user=(
+                current_user
             ),
         )
     )
@@ -264,10 +338,7 @@ def stream_nibgpt(
                 "start"
             )
 
-            if payload.mode in (
-                "document",
-                "knowledge",
-            ):
+            if route == "knowledge":
 
                 token_stream = (
                     stream_document_question(
@@ -314,7 +385,7 @@ def stream_nibgpt(
                 "no",
         },
     )
-    
+
 @router.post(
     "/report-explanation/stream"
 )
@@ -359,4 +430,4 @@ def stream_report_explanation_api(
                 "no",
         },
     )
-    
+
