@@ -78,11 +78,31 @@ Keep the complete summary under 350 words.
         ),
         output_requirements="""
 Return:
-- Document Type
-- Confidence
-- A concise two-sentence rationale based on document
-  structure and enforcement language such as shall,
-  must, and should.
+
+Document Type:
+- Classify the document using only its supplied evidence.
+
+Evidence:
+- Cite the document title and the strongest available
+  section, clause, or page evidence supporting the
+  classification.
+
+Rationale:
+- Briefly explain which explicit document characteristics
+  support the classification.
+- Base the rationale only on supplied document evidence.
+
+Do not generate a numeric or percentage confidence score.
+
+Do not infer document authority, regulatory status, approval
+status, hierarchy, or legal effect unless explicitly supported
+by the supplied evidence.
+
+Do not introduce external definitions or governance standards.
+
+If the document type cannot be established from the supplied
+evidence, state:
+"Information not found in internal documents"
 """.strip(),
     ),
 
@@ -93,19 +113,63 @@ Return:
             "from the supplied document."
         ),
         output_requirements="""
-Return valid JSON with:
+Extract metadata only when the exact value is explicitly stated
+in the supplied document evidence.
+
+Do not infer, estimate, calculate, normalize, or invent metadata.
+
+Do not derive metadata from common document conventions,
+general knowledge, document type, filenames, organizational
+structure, or assumptions.
+
+For each requested field, if an explicit value is not present
+in the supplied evidence, return exactly:
+"Information not found in internal documents"
+
+Return valid JSON using exactly these fields:
+
 {
-  "title": null,
-  "document_id": null,
-  "version": null,
-  "effective_date": null,
-  "review_cycle_months": null,
-  "target_audience": [],
-  "enforcement_level": null,
-  "governance_owner": null
+  "title": "",
+  "document_id": "",
+  "version": "",
+  "effective_date": "",
+  "review_cycle": "",
+  "target_audience": "",
+  "enforcement_level": "",
+  "governance_owner": ""
 }
 
-Use null when a value is not supported by the evidence.
+Every field must contain either:
+1. the value explicitly present in the supplied evidence; or
+2. "Information not found in internal documents"
+
+Never manufacture a document ID.
+
+Never manufacture or assume a version number.
+
+Never manufacture, infer, or calculate an effective date.
+
+Never infer a review cycle from dates or document type.
+
+Never infer target audience from people or roles merely
+mentioned in the document.
+
+Never classify an enforcement level unless the document
+explicitly states that value.
+
+Never infer governance ownership from an approval authority,
+Board reference, responsibility section, or organizational role.
+
+A role appearing in the document does not make that role
+the governance owner.
+
+Preserve dates and identifiers exactly as represented in
+the supplied evidence.
+
+Never expand an acronym unless its expansion is explicitly
+present in the supplied evidence.
+
+Return JSON only. Do not add explanatory text outside the JSON.
 """.strip(),
     ),
 
@@ -174,11 +238,68 @@ contradictions.
             "into sequential steps."
         ),
         output_requirements="""
-Return:
-Step # | Action Description | Responsible Role/Unit |
-Prerequisite Inputs | Deliverable/Output Record
+Identify only procedures or operational processes explicitly
+established by the supplied evidence.
 
-Do not invent missing steps.
+Treat separate document sections as separate processes unless
+the evidence explicitly establishes a sequence between them.
+
+Do not combine independent sections into one artificial
+end-to-end workflow.
+
+Do not create analysis or AI-processing steps such as:
+- identify the document
+- extract information
+- analyze the document
+- translate information into steps
+- map the process
+
+These are not document procedures.
+
+Within each identified process, preserve the document's
+explicit ordering and conditions.
+
+Do not convert duties, responsibilities, objectives,
+principles, headings, or general policy statements into
+procedural steps.
+
+Do not invent intermediate steps to complete a workflow.
+
+Do not assume that numbered statements from different
+sections form one continuous sequence.
+
+Identify a responsible role or unit only when that specific
+action is explicitly assigned to that role or unit in the
+supplied evidence.
+
+Never transfer a role from one action to another action.
+
+If the responsible role/unit for a step is not explicit,
+state exactly:
+"Information not found in internal documents"
+
+For every process state:
+- Process/Procedure Name
+- Source Section
+- Source Page
+
+For every supported step state:
+- Step/Rule Number
+- Action
+- Responsible Role/Unit
+- Condition/Trigger, when explicitly stated
+- Source reference
+
+Do not manufacture prerequisites, deliverables, records,
+forms, roles, deadlines, or outputs.
+
+Preserve document terminology and acronyms exactly.
+Never expand an acronym unless its expansion is explicitly
+present in the evidence.
+
+If no actual process or procedure is established by the
+evidence, return exactly:
+"Information not found in internal documents"
 """.strip(),
     ),
 
